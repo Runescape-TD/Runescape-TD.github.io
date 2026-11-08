@@ -5,7 +5,7 @@ export default defineConfig({
   base: "./",
   define: {
     __APP_VERSION__: JSON.stringify("0.1.0"),
-    __BUILD_ID__: JSON.stringify("0.1.0"),
+    __BUILD_ID__: JSON.stringify("0.28.1-d856ba6f"),
   },
   plugins: [
     react(),

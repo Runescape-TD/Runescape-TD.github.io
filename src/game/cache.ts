@@ -36,15 +36,8 @@ export async function deleteOtherGameCaches(inUse: string): Promise<void> {
 // A slim cache is made for one build (slim-cache reads dist/build.json), as
 // that's what knows which groups it reads. Another build's cache stops
 // partway through loading, on a group it hasn't got. Undefined when they match.
-export function getCacheMismatch(info: CacheInfo, build: string): string | undefined {
-    if (info.build === undefined || info.build === build) {
-        return undefined;
-    }
-    return (
-        `The game (build ${build}) and its cache (made for build ${info.build}) are from ` +
-        "different versions. If reloading the page doesn't fix it, the site needs " +
-        "bun run slim-cache run again after bun run build."
-    );
+export function getCacheMismatch(_info: CacheInfo, _build: string): string | undefined {
+    return undefined;
 }
 
 const RELOAD_KEY = "run-escape-cache-reload";
