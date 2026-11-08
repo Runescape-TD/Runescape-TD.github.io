@@ -1,0 +1,3148 @@
+import {
+    CSSProperties,
+    ReactNode,
+    memo,
+    useCallback,
+    useEffect,
+    useRef,
+    useState,
+    useSyncExternalStore,
+} from "react";
+
+import { OsrsLoadingBar } from "../../components/rs/loading/OsrsLoadingBar";
+import compass from "../../components/rs/minimap/compass.png";
+import minimapFrame from "../../components/rs/minimap/minimap-frame.png";
+import { EquipSlot } from "../../rs/model/player/PlayerModelLoader";
+import { isCoarsePointer } from "../../util/DeviceUtil";
+import { cloudKeepsCopy } from "../client/CloudSave";
+import { FRAME_RATES, FrameRate } from "../client/DisplaySettings";
+import { GameClient } from "../client/GameClient";
+import { padLabel } from "../client/GamePad";
+import {
+    BuffView,
+    GameStore,
+    GearSlotView,
+    HudNumbers,
+    HudView,
+    InventorySlotView,
+    QuestTrackView,
+    SlotView,
+    UiSnapshot,
+} from "../client/GameStore";
+import { formatTime } from "../client/GameView";
+import { RUN_ANALYTICS_URL } from "../client/RunAnalytics";
+import { CHARACTERS, getCharacter } from "../content/characters";
+import { GEAR_SLOT_BY_ID } from "../content/items";
+import {
+    CAMPAIGN_MAPS,
+    DEV_MAPS,
+    FIGHT_MAPS,
+    FUN_MAPS,
+    MAPS,
+    RAID_MAPS,
+    SEASONAL_MAPS,
+    getMap,
+    getMapCharacter,
+} from "../content/maps";
+import { PET_BY_ID, getFoundPets, getPetTrophy } from "../content/pets";
+import { RARITIES } from "../content/rarity";
+import { SHOP_UPGRADES } from "../content/shop";
+import { formatStats } from "../content/stats";
+import { COLLECTION_LOG_OBJ, REFUND_SPRITE, TITLE_TAB_SPRITES } from "../content/titleIcons";
+import { TROPHY_BY_ID } from "../content/trophies";
+import { CharacterDef, CombatStyle, MapDef } from "../content/types";
+import { MapReward, describeUnlockTask, getMapRewards } from "../content/unlocks";
+import { WeaponStatLine, formatWeaponStat } from "../content/weaponStats";
+import { WEAPONS, getWeapon } from "../content/weapons";
+import type { RaidChest } from "../core/Sim";
+import {
+    NewerSaveError,
+    SaveData,
+    getNextUpgradeCost,
+    getSkillCoins,
+    importSave,
+    isEndlessUnlocked,
+    isExpertUnlocked,
+    isHardUnlocked,
+    isMapUnlocked,
+} from "../core/save";
+import { MapGeneratorButton } from "../scaperune/MapGeneratorScreen";
+import { AbilityButton } from "./AbilityButton";
+import { ArmouryScreen } from "./ArmouryScreen";
+import { BanishButton } from "./BanishButton";
+import { ChangelogPanel } from "./ChangelogPanel";
+import { ChestModal } from "./ChestModal";
+import { CloudChoicePanel, CloudSaveButton, CloudSavePanel, CloudSaveSettings } from "./CloudSave";
+import { Coins } from "./Coins";
+import { CollectionLogScreen } from "./CollectionLogScreen";
+import { CoopScreen, PartyFrames, ReviveNote, WaitingNote } from "./CoopScreen";
+import { DescriptionButton, ItemDescription } from "./DescriptionButton";
+import { EventModal } from "./EventModal";
+import "./GameUi.css";
+import { InventoryItem } from "./InventoryItem";
+import { ItemIcon } from "./ItemIcon";
+import { NoticePanel } from "./NoticePanel";
+import { KeyHint, PadControls, PadIcon, usePadKind } from "./PadHint";
+import { QuestScreen } from "./QuestScreen";
+import { RerollButton } from "./RerollButton";
+import { ExportReminder, SaveBlockPanel, UnreadableSavePanel } from "./SavePanels";
+import { SkipButton } from "./SkipButton";
+import { StatLine } from "./StatLine";
+import { RotateNotice, TouchControls, enterFullscreen } from "./TouchControls";
+import { GAME_VERSION } from "./changelog";
+import { formatCompact, formatShare } from "./formatCompact";
+import { Notice, loadNotice, markNoticeSeen, shouldShowNotice } from "./notice";
+
+type Props = {
+    store: GameStore;
+    client?: GameClient;
+};
+
+// The UI is laid out for a window about 720 pixels tall; bigger windows draw
+// it bigger, up to twice the size, so it isn't lost on a large screen
+const UI_BASE_HEIGHT = 720;
+const UI_BASE_WIDTH = 1150;
+const UI_MAX_SCALE = 2;
+
+function getUiScale(): number {
+    const fit = Math.min(window.innerHeight / UI_BASE_HEIGHT, window.innerWidth / UI_BASE_WIDTH);
+    // In twentieths, so a small resize doesn't relayout everything
+    return Math.round(Math.min(UI_MAX_SCALE, Math.max(1, fit)) * 20) / 20;
+}
+
+function useUiScale(): number {
+    const [scale, setScale] = useState(getUiScale);
+    useEffect(() => {
+        const onResize = () => setScale(getUiScale());
+        window.addEventListener("resize", onResize);
+        return () => window.removeEventListener("resize", onResize);
+    }, []);
+    return scale;
+}
+
+export function GameUi({ store, client }: Props): JSX.Element {
+    const ui = useSyncExternalStore(store.subscribe, store.getSnapshot);
+    const scale = useUiScale();
+
+    if (ui.screen === "loading" || !client) {
+        return (
+            <div
+                className="ui-fill ui-center ui-loading"
+                // The opening cinematic's squares loading: a click or tap skips it, as it would
+                // once it plays
+                onPointerDown={ui.cinematic && client ? () => client.skipCinematic() : undefined}
+            >
+                <OsrsLoadingBar text={ui.loadingText} progress={ui.loadingProgress} />
+            </div>
+        );
+    }
+
+    // Every button clicks like the client's interface does (but not ones
+    // with sounds of their own)
+    const onClickCapture = (event: React.MouseEvent) => {
+        if ((event.target as HTMLElement).closest("button:not([data-silent])")) {
+            client.playClick();
+        }
+    };
+    let screen: JSX.Element = <></>;
+    switch (ui.screen) {
+        case "title":
+            screen = <TitleScreen ui={ui} client={client} />;
+            break;
+        case "characters":
+            screen = <CharacterScreen ui={ui} client={client} />;
+            break;
+        case "shop":
+            screen = <ShopScreen ui={ui} client={client} />;
+            break;
+        case "armoury":
+            screen = <ArmouryScreen ui={ui} client={client} />;
+            break;
+        case "quests":
+            screen = <QuestScreen ui={ui} client={client} />;
+            break;
+        case "collectionLog":
+            screen = <CollectionLogScreen ui={ui} client={client} />;
+            break;
+        case "coop":
+            screen = <CoopScreen ui={ui} client={client} />;
+            break;
+        case "run":
+            screen = <RunScreen ui={ui} client={client} />;
+            break;
+    }
+    return (
+        <div
+            className="ui-contents"
+            style={{ "--ui-scale": scale } as CSSProperties}
+            onClickCapture={onClickCapture}
+        >
+            {screen}
+            {ui.saveBlock && !ui.saveBlockClosed && (
+                <SaveBlockPanel block={ui.saveBlock} client={client} />
+            )}
+            {isCoarsePointer && <RotateNotice />}
+        </div>
+    );
+}
+
+type ScreenProps = { ui: UiSnapshot; client: GameClient };
+
+// A setting's name and what it does, with its control on the right
+function Setting({
+    name,
+    text,
+    children,
+}: {
+    name: string;
+    text?: string;
+    children: ReactNode;
+}): JSX.Element {
+    return (
+        <div className="ui-setting">
+            <div className="ui-setting-label">
+                <div className="ui-setting-name">{name}</div>
+                {text && <div className="ui-setting-text">{text}</div>}
+            </div>
+            <div className="ui-setting-control">{children}</div>
+        </div>
+    );
+}
+
+export function Toggle({
+    on,
+    label,
+    onToggle,
+}: {
+    on: boolean;
+    label: string;
+    onToggle: () => void;
+}): JSX.Element {
+    return (
+        <button
+            className={"ui-button ui-button-small ui-toggle" + (on ? " ui-toggle-on" : "")}
+            aria-label={label}
+            aria-pressed={on}
+            onClick={(e) => {
+                onToggle();
+                // Give Enter and Space back to the screen
+                e.currentTarget.blur();
+            }}
+        >
+            {on ? "On" : "Off"}
+        </button>
+    );
+}
+
+// music: the run's map has music, so it gets its own volume
+function SoundSettings({
+    ui,
+    client,
+    music = false,
+}: ScreenProps & { music?: boolean }): JSX.Element {
+    const { muted, volume } = ui.audio;
+    return (
+        <>
+            <Setting
+                name="Sound"
+                text={isCoarsePointer ? undefined : "M turns it on and off at any time"}
+            >
+                <Toggle on={!muted} label="Sound" onToggle={() => client.toggleMute()} />
+            </Setting>
+            <VolumeSetting
+                name="Volume"
+                value={volume}
+                muted={muted}
+                onChange={(value) => client.setVolume(value)}
+            />
+            {music && (
+                <VolumeSetting
+                    name="Music"
+                    value={ui.audio.music}
+                    muted={muted}
+                    onChange={(value) => client.setMusicVolume(value)}
+                />
+            )}
+        </>
+    );
+}
+
+function VolumeSetting({
+    name,
+    value,
+    muted,
+    onChange,
+}: {
+    name: string;
+    value: number;
+    muted: boolean;
+    onChange: (value: number) => void;
+}): JSX.Element {
+    return (
+        <Setting name={name}>
+            <input
+                className={"ui-volume" + (muted ? " ui-volume-muted" : "")}
+                type="range"
+                min={0}
+                max={100}
+                value={Math.round(value * 100)}
+                onChange={(e) => onChange(parseInt(e.target.value) / 100)}
+                // Give the keys back to the game once it's set
+                onPointerUp={(e) => e.currentTarget.blur()}
+                aria-label={name}
+            />
+            <span className="ui-volume-value">{Math.round(value * 100)}%</span>
+        </Setting>
+    );
+}
+
+function AutoPauseSetting({ ui, client }: ScreenProps): JSX.Element {
+    return (
+        <Setting
+            name="Auto-pause"
+            text={`Pause the run when you ${isCoarsePointer ? "leave" : "click away from"} the game`}
+        >
+            <Toggle
+                on={ui.display.pauseOnBlur}
+                label="Auto-pause"
+                onToggle={() => client.toggleAutoPause()}
+            />
+        </Setting>
+    );
+}
+
+function PickupTimerSetting({ ui, client }: ScreenProps): JSX.Element {
+    return (
+        <Setting
+            name="Power-up timers"
+            text="A circle over each power-up on the ground shows how long it has left"
+        >
+            <Toggle
+                on={ui.display.pickupTimers}
+                label="Power-up timers"
+                onToggle={() => client.togglePickupTimers()}
+            />
+        </Setting>
+    );
+}
+
+function AutoAlchSetting({ ui, client }: ScreenProps): JSX.Element {
+    return (
+        <Setting name="Auto alch" text="High alch every casket as you open it, without stopping">
+            <Toggle
+                on={ui.display.autoAlch}
+                label="Auto alch"
+                onToggle={() => client.toggleAutoAlch()}
+            />
+        </Setting>
+    );
+}
+
+function MovePredictionSetting({ ui, client }: ScreenProps): JSX.Element {
+    return (
+        <Setting
+            name="Movement prediction"
+            text="Joining a co-op game, you move as soon as you press, then correct to the host"
+        >
+            <Toggle
+                on={ui.display.movePrediction}
+                label="Movement prediction"
+                onToggle={() => client.toggleMovePrediction()}
+            />
+        </Setting>
+    );
+}
+
+function CoopFlagSetting({ ui, client }: ScreenProps): JSX.Element {
+    return (
+        <Setting
+            name="Co-op flag"
+            text="Other co-op players see your country's flag (an open room shows its host's either way)"
+        >
+            <Toggle
+                on={ui.display.coopFlag}
+                label="Co-op flag"
+                onToggle={() => client.toggleCoopFlag()}
+            />
+        </Setting>
+    );
+}
+
+// Only in a build that has a collector to send to
+function RunStatsSetting({ ui, client }: ScreenProps): JSX.Element | null {
+    if (!RUN_ANALYTICS_URL) {
+        return null;
+    }
+    return (
+        <Setting
+            name="Share run stats"
+            text="When a run ends, send its map, mode, adventurers and result, with no name or save, to help balance the game. Co-op relays can still note a run their cheat checks flag."
+        >
+            <Toggle
+                on={ui.display.runStats}
+                label="Share run stats"
+                onToggle={() => client.toggleRunStats()}
+            />
+        </Setting>
+    );
+}
+
+function AutoEquipSetting({ ui, client }: ScreenProps): JSX.Element {
+    return (
+        <Setting
+            name="Auto equip"
+            text="Equip casket gear into empty slots or when no bonus drops and at least one improves. Always ask before replacing a set piece. Auto alch takes priority."
+        >
+            <Toggle
+                on={ui.display.autoEquip}
+                label="Auto equip"
+                onToggle={() => client.toggleAutoEquip()}
+            />
+        </Setting>
+    );
+}
+
+const FRAME_RATE_NAMES: Record<FrameRate, string> = {
+    auto: "Auto",
+    "30": "30",
+    "60": "60",
+    unlimited: "Unlimited",
+};
+
+function FrameRateSetting({ ui, client }: ScreenProps): JSX.Element {
+    return (
+        <Setting
+            name="Frame rate"
+            text="Frames a second at most. Auto is 60 on a phone or tablet, as many as the screen shows otherwise"
+        >
+            {FRAME_RATES.map((rate) => (
+                <button
+                    key={rate}
+                    className={
+                        "ui-button ui-button-small ui-frame-rate" +
+                        (ui.display.frameRate === rate ? " ui-frame-rate-on" : "")
+                    }
+                    aria-pressed={ui.display.frameRate === rate}
+                    onClick={(e) => {
+                        client.setFrameRate(rate);
+                        // Give Enter and Space back to the screen
+                        e.currentTarget.blur();
+                    }}
+                >
+                    {FRAME_RATE_NAMES[rate]}
+                </button>
+            ))}
+        </Setting>
+    );
+}
+
+// The community server's invite
+const DISCORD_INVITE = "https://discord.gg/82gBtKz2Xx";
+const GITHUB_REPOSITORY = "https://github.com/Dynrothe/Run-Escape";
+
+function GitHubLink(): JSX.Element {
+    return (
+        <a
+            className="ui-title-link ui-github"
+            href={GITHUB_REPOSITORY}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="See the code on GitHub"
+            aria-label="See the code on GitHub"
+            onClick={(e) => e.currentTarget.blur()}
+        >
+            <svg className="ui-title-link-logo" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+            </svg>
+        </a>
+    );
+}
+
+function DiscordLink(): JSX.Element {
+    return (
+        <a
+            className="ui-title-link ui-discord"
+            href={DISCORD_INVITE}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Join the Discord"
+            aria-label="Join the Discord"
+            onClick={(e) => e.currentTarget.blur()}
+        >
+            <svg className="ui-title-link-logo" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189z" />
+            </svg>
+        </a>
+    );
+}
+
+// Saves live in this browser; a file carries one to another, or keeps a copy
+function SaveSetting({ ui, client }: ScreenProps): JSX.Element {
+    const fileInput = useRef<HTMLInputElement>(null);
+    const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        // So picking the same file again still counts
+        e.target.value = "";
+        if (!file) {
+            return;
+        }
+        // Nothing's being saved, so an import wouldn't be kept
+        if (ui.saveBlock) {
+            window.alert(
+                "The game isn't saving right now (see the notice on the title screen), so an imported save wouldn't be kept.",
+            );
+            return;
+        }
+        let save: SaveData;
+        try {
+            save = importSave(await file.text(), GAME_VERSION);
+        } catch (e) {
+            window.alert(
+                e instanceof NewerSaveError
+                    ? `${file.name} is from a newer version of Run Escape. Reload to get it, then import.`
+                    : `${file.name} isn't a Run Escape save.`,
+            );
+            return;
+        }
+        const describe = (s: SaveData) =>
+            `${s.coins.toLocaleString()} coins, ${s.runs} runs, ${s.victories} wins`;
+        const replace = window.confirm(
+            `Replace your save (${describe(ui.save)}) with this one (${describe(save)})?\n\n` +
+                "Export yours first if you want to keep it.",
+        );
+        if (replace) {
+            client.replaceSave(save);
+        }
+    };
+    return (
+        <Setting
+            name="Your progress"
+            text="Kept in this browser. Export a copy to keep it safe or take it to another one."
+        >
+            <button
+                className="ui-button ui-button-small"
+                onClick={(e) => {
+                    client.exportSave();
+                    e.currentTarget.blur();
+                }}
+            >
+                Export
+            </button>
+            <button
+                className="ui-button ui-button-small"
+                disabled={ui.saveBlock !== undefined}
+                title={ui.saveBlock && "Nothing's being saved right now, so it wouldn't be kept"}
+                onClick={(e) => {
+                    fileInput.current?.click();
+                    e.currentTarget.blur();
+                }}
+            >
+                Import
+            </button>
+            <input
+                ref={fileInput}
+                type="file"
+                accept=".json,application/json"
+                hidden
+                onChange={onFile}
+            />
+        </Setting>
+    );
+}
+
+// Saves that couldn't be read, kept as they were
+function UnreadableSaveSettings({ ui, client }: ScreenProps): JSX.Element {
+    return (
+        <>
+            {ui.unreadableSaves.map(({ key, time }) => {
+                const when = new Date(time).toLocaleString();
+                return (
+                    <Setting
+                        key={key}
+                        name="Unreadable save"
+                        text={`From ${when}. Export it to mend by hand or ask for help on the Discord.`}
+                    >
+                        <button
+                            className="ui-button ui-button-small"
+                            onClick={(e) => {
+                                client.exportUnreadableSave(key);
+                                e.currentTarget.blur();
+                            }}
+                        >
+                            Export
+                        </button>
+                        <button
+                            className="ui-button ui-button-small"
+                            onClick={(e) => {
+                                e.currentTarget.blur();
+                                if (window.confirm(`Delete the save from ${when} for good?`)) {
+                                    client.deleteUnreadableSave(key);
+                                }
+                            }}
+                        >
+                            Delete
+                        </button>
+                    </Setting>
+                );
+            })}
+        </>
+    );
+}
+
+// Behind the title screen's Settings button
+function SettingsPanel({
+    ui,
+    client,
+    onClose,
+}: ScreenProps & { onClose: () => void }): JSX.Element {
+    const padKind = usePadKind();
+    return (
+        <div className="ui-panel rs-border rs-background ui-settings">
+            <h2>Settings</h2>
+            <div className="ui-settings-body">
+                <section className="ui-settings-section">
+                    <h3>Sound</h3>
+                    <SoundSettings ui={ui} client={client} />
+                </section>
+                <section className="ui-settings-section">
+                    <h3>Game</h3>
+                    <Setting
+                        name="Camera spin"
+                        text="The camera circles your adventurer on the menus"
+                    >
+                        <Toggle
+                            on={ui.display.menuSpin}
+                            label="Camera spin"
+                            onToggle={() => client.toggleMenuSpin()}
+                        />
+                    </Setting>
+                    <Setting name="Screen shake" text="The camera shakes when a boss's blow lands">
+                        <Toggle
+                            on={ui.display.screenShake}
+                            label="Screen shake"
+                            onToggle={() => client.toggleScreenShake()}
+                        />
+                    </Setting>
+                    <PickupTimerSetting ui={ui} client={client} />
+                    <AutoPauseSetting ui={ui} client={client} />
+                    <AutoAlchSetting ui={ui} client={client} />
+                    <AutoEquipSetting ui={ui} client={client} />
+                    <MovePredictionSetting ui={ui} client={client} />
+                    <CoopFlagSetting ui={ui} client={client} />
+                    <RunStatsSetting ui={ui} client={client} />
+                    <FrameRateSetting ui={ui} client={client} />
+                </section>
+                {padKind && (
+                    <section className="ui-settings-section">
+                        <h3>Controller</h3>
+                        <PadControls />
+                    </section>
+                )}
+                <section className="ui-settings-section">
+                    <h3>Save</h3>
+                    <SaveSetting ui={ui} client={client} />
+                    <CloudSaveSettings cloud={ui.cloud} client={client} saving={!ui.saveBlock} />
+                    <UnreadableSaveSettings ui={ui} client={client} />
+                </section>
+            </div>
+            <div className="ui-row">
+                <button className="ui-button" onClick={onClose}>
+                    Back
+                </button>
+            </div>
+        </div>
+    );
+}
+
+// A smaller way in, under the play buttons: an item, or a sprite on its own
+function TitleTile({
+    name,
+    objId = -1,
+    spriteId,
+    onClick,
+}: {
+    name: string;
+    objId?: number;
+    spriteId?: number;
+    onClick: () => void;
+}): JSX.Element {
+    return (
+        <button className="ui-card ui-title-tile" onClick={onClick}>
+            <ItemIcon objId={objId} spriteId={spriteId} />
+            {name}
+        </button>
+    );
+}
+
+function TitleStat({ name, value }: { name: string; value: string | number }): JSX.Element {
+    return (
+        <span className="ui-title-stat">
+            {name} <span className="ui-title-stat-value">{value}</span>
+        </span>
+    );
+}
+
+function TitleScreen({ ui, client }: ScreenProps): JSX.Element {
+    const save = ui.save;
+    // The panel saying the game isn't saving is over everything, so the title's
+    // own wait till it's gone
+    const savePanel = ui.saveBlock !== undefined && !ui.saveBlockClosed;
+    // The cloud has a different save, and asks which to keep
+    const cloudChoice = ui.cloud?.choice !== undefined && !ui.cloud.choice.closed;
+    const [changelogOpen, setChangelogOpen] = useState(false);
+    const [settingsOpen, setSettingsOpen] = useState(false);
+    // Cloud save's own panel, from its button
+    const [cloudOpen, setCloudOpen] = useState(false);
+    // The notice, until it's closed (once for each new one)
+    const [notice, setNotice] = useState<Notice>();
+    useEffect(() => {
+        let mounted = true;
+        loadNotice().then((loaded) => {
+            if (mounted && loaded && shouldShowNotice(loaded)) {
+                setNotice(loaded);
+            }
+        });
+        return () => {
+            mounted = false;
+        };
+    }, []);
+    const closeNotice = useCallback(() => {
+        if (notice) {
+            markNoticeSeen(notice);
+        }
+        setNotice(undefined);
+    }, [notice]);
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if (savePanel) {
+                return;
+            } else if (cloudChoice) {
+                if (e.code === "Escape") {
+                    client.cloud?.later();
+                }
+            } else if (ui.unreadableSave) {
+                if (e.code === "Escape") {
+                    client.closeUnreadableNotice();
+                }
+            } else if (notice) {
+                if (e.code === "Enter" || e.code === "Space" || e.code === "Escape") {
+                    closeNotice();
+                }
+            } else if (changelogOpen || settingsOpen || cloudOpen) {
+                if (e.code === "Escape") {
+                    setChangelogOpen(false);
+                    setSettingsOpen(false);
+                    setCloudOpen(false);
+                }
+            } else if (
+                e.code === "Space" ||
+                // Enter on something focused from the keyboard is for that instead
+                (e.code === "Enter" && !(e.target as HTMLElement).closest("button, a"))
+            ) {
+                client.showScreen("characters");
+            }
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [
+        client,
+        changelogOpen,
+        settingsOpen,
+        cloudOpen,
+        notice,
+        closeNotice,
+        ui.unreadableSave,
+        savePanel,
+        cloudChoice,
+    ]);
+    // Over the title's own panels too: Sync now or a code linked from Settings or cloud save's
+    // panel can be what asks
+    const choicePanel =
+        !savePanel && cloudChoice && ui.cloud ? (
+            <CloudChoicePanel cloud={ui.cloud} save={save} client={client} />
+        ) : undefined;
+    if (changelogOpen) {
+        return (
+            <div className="ui-fill ui-center">
+                <ChangelogPanel onClose={() => setChangelogOpen(false)} />
+                {choicePanel}
+            </div>
+        );
+    }
+    if (settingsOpen) {
+        return (
+            <div className="ui-fill ui-center">
+                <SettingsPanel ui={ui} client={client} onClose={() => setSettingsOpen(false)} />
+                {choicePanel}
+            </div>
+        );
+    }
+    if (cloudOpen) {
+        return (
+            <div className="ui-fill ui-center">
+                <CloudSavePanel
+                    cloud={ui.cloud}
+                    client={client}
+                    saving={!ui.saveBlock}
+                    onClose={() => setCloudOpen(false)}
+                />
+                {choicePanel}
+            </div>
+        );
+    }
+    return (
+        <div className="ui-fill ui-title">
+            <div className="ui-title-logo">
+                <h1>Run Escape</h1>
+                <p>
+                    Survive fifteen minutes and beat the boss. Wins and tasks bring new places and
+                    adventurers.
+                </p>
+            </div>
+            <div className="ui-title-bottom">
+                <div className="ui-panel rs-border rs-background ui-title-menu">
+                    <div className="ui-title-play">
+                        <button
+                            className="ui-button ui-button-big"
+                            onClick={() => {
+                                enterFullscreen();
+                                client.showScreen("characters");
+                            }}
+                        >
+                            Singleplayer
+                        </button>
+                        {ui.coop.available && (
+                            <button
+                                className="ui-button ui-button-big"
+                                onClick={() => client.openCoop()}
+                            >
+                                Multiplayer
+                            </button>
+                        )}
+                    </div>
+                    <div className="ui-title-tiles">
+                        <TitleTile
+                            name="Skills"
+                            spriteId={TITLE_TAB_SPRITES.skills}
+                            onClick={() => client.showScreen("shop")}
+                        />
+                        <TitleTile
+                            name="Armoury"
+                            spriteId={TITLE_TAB_SPRITES.armoury}
+                            onClick={() => client.showScreen("armoury")}
+                        />
+                        <TitleTile
+                            name="Quests"
+                            spriteId={TITLE_TAB_SPRITES.quests}
+                            onClick={() => client.showScreen("quests")}
+                        />
+                        <TitleTile
+                            name="Collection log"
+                            objId={COLLECTION_LOG_OBJ}
+                            onClick={() => client.showScreen("collectionLog")}
+                        />
+                    </div>
+                    <div className="ui-title-stats">
+                        <Coins amount={save.coins} />
+                        <TitleStat name="Runs" value={save.runs} />
+                        <TitleStat name="Wins" value={save.victories} />
+                        <TitleStat name="Best" value={formatTime(save.bestSeconds)} />
+                        <TitleStat name="Best level" value={save.bestLevel} />
+                    </div>
+                </div>
+                {/* Under the menu, so a controller's highlight still starts on
+                    Singleplayer; not while nothing's saving, as that panel comes first */}
+                {/* Nor while cloud save has a copy: only while it's on, synced, and nothing's
+                    wrong, as a code that's stopped working keeps none */}
+                {!ui.saveBlock && !cloudKeepsCopy(ui.cloud) && (
+                    <ExportReminder save={save} client={client} />
+                )}
+                <TitleHint />
+            </div>
+            <div className="ui-title-utils">
+                {ui.saveBlock && ui.saveBlockClosed && (
+                    <button
+                        className="ui-version ui-save-off"
+                        onClick={() => client.showSaveBlock()}
+                    >
+                        Not saving
+                    </button>
+                )}
+                {import.meta.env.DEV && <MapGeneratorButton client={client} />}
+                <button className="ui-version" onClick={() => setChangelogOpen(true)}>
+                    v{GAME_VERSION} · What's new
+                </button>
+                <CloudSaveButton
+                    cloud={ui.cloud}
+                    client={client}
+                    onOpen={() => setCloudOpen(true)}
+                />
+                <button
+                    className="ui-title-link ui-title-settings"
+                    title="Settings"
+                    aria-label="Settings"
+                    onClick={() => setSettingsOpen(true)}
+                >
+                    <ItemIcon objId={-1} spriteId={TITLE_TAB_SPRITES.settings} />
+                </button>
+                <DiscordLink />
+                <GitHubLink />
+            </div>
+            {savePanel ? null : choicePanel ? (
+                choicePanel
+            ) : ui.unreadableSave ? (
+                <UnreadableSavePanel keptAs={ui.unreadableSave} client={client} />
+            ) : (
+                notice && <NoticePanel notice={notice} onClose={closeNotice} />
+            )}
+        </div>
+    );
+}
+
+const STYLE_NAMES: Record<CombatStyle, string> = {
+    melee: "Melee",
+    ranged: "Ranged",
+    magic: "Magic",
+};
+
+const STYLES: CombatStyle[] = ["melee", "ranged", "magic"];
+
+// The Very rare weapon only this class can find
+function getClassTreasure(style: CombatStyle) {
+    return WEAPONS.find((w) => w.style === style && w.rarity === "veryRare");
+}
+
+export function getStartingWeaponIcon(character: CharacterDef): number {
+    const weapon = getWeapon(character.startingWeapon);
+    return weapon.levels[0].objId ?? weapon.iconObjId;
+}
+
+// How to play, under the title's buttons: the controller's buttons once one's
+// in use (a browser shows no pad until a button's pressed)
+function TitleHint(): JSX.Element {
+    const pad = usePadKind();
+    if (pad) {
+        return (
+            <div className="ui-hint ui-hint-pad">
+                <PadIcon kind={pad} icon="move" label="Left stick" /> to move · weapons fire on
+                their own · <PadIcon kind={pad} icon="start" label={padLabel(pad, "start")} /> to
+                pause · <PadIcon kind={pad} icon="south" label={padLabel(pad, "south")} /> to pick
+            </div>
+        );
+    }
+    return (
+        <div className="ui-hint">
+            {isCoarsePointer
+                ? "Drag anywhere to move · weapons fire on their own"
+                : "WASD to move · weapons fire on their own · Esc to pause · M to mute"}
+        </div>
+    );
+}
+
+// Adventurers on the left and maps on the right, so the adventurer picked
+// stands in view between them
+function CharacterScreen({ ui, client }: ScreenProps): JSX.Element {
+    // A raid's expert mode, solo only for now (GameClient.toggleExpert)
+    const expertShown = getMap(ui.mapId).raid !== undefined && ui.coop.status === "offline";
+    return (
+        <div className="ui-fill ui-select">
+            <AdventurerPanel ui={ui} client={client} fixed={getMapCharacter(getMap(ui.mapId))} />
+            <MapPanel ui={ui} client={client} />
+            <div className="ui-panel rs-border rs-background ui-select-bar">
+                <button className="ui-button" onClick={() => client.showScreen("title")}>
+                    Back
+                </button>
+                <Coins amount={ui.save.coins} />
+                {/* A raid ends with its last room: no endless */}
+                {!getMap(ui.mapId).raid && <EndlessSwitch ui={ui} client={client} />}
+                <HardSwitch ui={ui} client={client} />
+                {expertShown && <ExpertSwitch ui={ui} client={client} />}
+                <button
+                    className="ui-button ui-button-go ui-select-go"
+                    onClick={() => client.startRun()}
+                >
+                    <KeyHint pad="start" /> Enter {getMap(ui.mapId).name}
+                    {ui.hard && (ui.expert && expertShown ? " expert" : " hard")}
+                    {ui.endless && !getMap(ui.mapId).fun && " endless"}
+                </button>
+            </div>
+        </div>
+    );
+}
+
+// Endless runs for the map picked, once it's been beaten (fun maps are
+// always endless, and a boss fight never is)
+function EndlessSwitch({ ui, client }: ScreenProps): JSX.Element {
+    if (getMap(ui.mapId).fight) {
+        return (
+            <div className="ui-endless" title="A boss fight is over when she is.">
+                <span className="ui-endless-name">Endless</span>
+                <span className="ui-endless-hint">One fight</span>
+            </div>
+        );
+    }
+    if (getMap(ui.mapId).fun) {
+        return (
+            <div
+                className="ui-endless"
+                title="Fun maps are endless: a new round every fifteen minutes."
+            >
+                <span className="ui-endless-name">Endless</span>
+                <span className="ui-endless-hint">Always</span>
+            </div>
+        );
+    }
+    const open = isEndlessUnlocked(ui.save, ui.mapId);
+    return (
+        <div
+            className={"ui-endless" + (open ? "" : " ui-endless-locked")}
+            title={
+                open
+                    ? "Round after round, each tougher than the last, until you fall. " +
+                      "Your weapons, passives and gear keep getting stronger too."
+                    : `Beat ${getMap(ui.mapId).name} to play it endless`
+            }
+        >
+            <span className="ui-endless-name">Endless</span>
+            {open ? (
+                <Toggle on={ui.endless} label="Endless" onToggle={() => client.toggleEndless()} />
+            ) : (
+                <span className="ui-endless-hint">Beat the map</span>
+            )}
+        </div>
+    );
+}
+
+// Hard mode for the map picked, once it's been beaten (open from the start on
+// fun maps)
+function HardSwitch({ ui, client }: ScreenProps): JSX.Element {
+    const open = isHardUnlocked(ui.save, ui.mapId);
+    return (
+        <div
+            className={"ui-endless" + (open ? "" : " ui-endless-locked")}
+            title={
+                open
+                    ? "More enemies, tougher and harder hitting, twice the elites, and bosses " +
+                      "that enrage sooner and attack faster. Coins are worth 25% more."
+                    : `Beat ${getMap(ui.mapId).name} to play it on hard`
+            }
+        >
+            <span className="ui-endless-name">Hard</span>
+            {open ? (
+                <Toggle on={ui.hard} label="Hard" onToggle={() => client.toggleHard()} />
+            ) : (
+                <span className="ui-endless-hint">Beat the map</span>
+            )}
+        </div>
+    );
+}
+
+// What a raid's hall wants of you: hold out until its boss comes (or take the portal). The first
+// time through, a line on how the raid goes, as it's not like a campaign map.
+function RaidObjective({
+    room,
+    bossIn,
+}: {
+    room: NonNullable<HudNumbers["raidRoom"]>;
+    bossIn: number;
+}): JSX.Element {
+    const boss = room.name.replace(/^The /, "the ");
+    return (
+        <div
+            className={
+                bossIn <= 60 ? "ui-raid-objective ui-raid-objective-soon" : "ui-raid-objective"
+            }
+        >
+            <div>
+                Survive the waves: {boss} in {formatTime(Math.ceil(bossIn))}
+            </div>
+            {room.portal && (
+                <div className="ui-raid-objective-hint">
+                    Or step into the portal to face {boss} now
+                </div>
+            )}
+            {room.first && room.number === 1 && (
+                <div className="ui-raid-objective-hint">
+                    {room.count} rooms, each with its waves and then its boss. Kill the boss to move
+                    on.
+                </div>
+            )}
+        </div>
+    );
+}
+
+// The chest at the end of a raid: what it was rolled with, and what came out
+function RaidChestView({ chest }: { chest: RaidChest }): JSX.Element {
+    const found = chest.found.map((id) => TROPHY_BY_ID.get(id)!).filter(Boolean);
+    return (
+        <div className="ui-raid-chest">
+            <div className="ui-raid-chest-title">
+                {found.length > 0 ? "A purple chest!" : "The raid's chest"}
+            </div>
+            <div className="ui-subtle">
+                {chest.points.toLocaleString("en-GB")} raid points: a{" "}
+                {Math.round(chest.chance * 100)}% chance of a unique
+            </div>
+            {found.length > 0 ? (
+                <div className="ui-raid-chest-items">
+                    {found.map((trophy) => (
+                        <span key={trophy.id} className="ui-raid-chest-item">
+                            <ItemIcon objId={trophy.objId} size={36} />
+                            {trophy.name}
+                        </span>
+                    ))}
+                </div>
+            ) : (
+                <div className="ui-subtle">No unique this time.</div>
+            )}
+        </div>
+    );
+}
+
+// A raid's expert mode, once it's been beaten on hard: hard mode, and the Nylocas only hurt by
+// their own style
+function ExpertSwitch({ ui, client }: ScreenProps): JSX.Element {
+    const open = isExpertUnlocked(ui.save, ui.mapId);
+    return (
+        <div
+            className={"ui-endless" + (open ? "" : " ui-endless-locked")}
+            title={
+                open
+                    ? "Hard mode, and the Nylocas only take damage from their own style: grey " +
+                      "melee, green ranged, blue magic. Nylocas Vasilias changes colour. Bring " +
+                      "all three. Twice the coins, and one of Lil' Zik's looks each clear."
+                    : `Beat ${getMap(ui.mapId).name} on hard to play it on expert`
+            }
+        >
+            <span className="ui-endless-name">Expert</span>
+            {open ? (
+                <Toggle on={ui.expert} label="Expert" onToggle={() => client.toggleExpert()} />
+            ) : (
+                <span className="ui-endless-hint">Beat it on hard</span>
+            )}
+        </div>
+    );
+}
+
+// A pointer leaving a panel goes back to what's picked. Not a finger: browsers
+// follow a tap with a mouse leaving, which would take away what was tapped.
+function stopPeeking(setPeek: (id: undefined) => void): (() => void) | undefined {
+    return isCoarsePointer ? undefined : () => setPeek(undefined);
+}
+
+// Adventurers by how they fight, each a tile of their outfit with the weapon
+// they start with in its corner. The details pinned below are for the one
+// pointed at (or tapped, so a locked one can say what it takes) until the
+// pointer leaves the panel, then the one picked. Only moving the pointer
+// changes it: the list scrolling under a still pointer doesn't.
+// fixed: the adventurer the map picked makes everyone play (Falador's Durial321,
+// Phosani's Inquisitor), with the choice blurred out under them
+export function AdventurerPanel({
+    ui,
+    client,
+    fixed,
+}: ScreenProps & { fixed?: string }): JSX.Element {
+    const unlocked = ui.save.unlockedCharacters;
+    const [peek, setPeek] = useState<string>();
+    // The roster: not an adventurer played on one map alone (CharacterDef.only)
+    const roster = CHARACTERS.filter((c) => !c.only);
+    const opened = roster.filter((c) => unlocked.includes(c.id)).length;
+    const shown = fixed ?? peek ?? ui.characterId;
+    return (
+        <div
+            className={
+                "ui-panel rs-border rs-background ui-select-panel ui-select-adventurers" +
+                (fixed ? " ui-select-fixed" : "")
+            }
+            onMouseLeave={stopPeeking(setPeek)}
+            // Only focus leaving the panel: moving to the favourite button mustn't swap the
+            // details, and the button, out from under the click
+            onBlur={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget)) {
+                    setPeek(undefined);
+                }
+            }}
+        >
+            <h2 className="ui-select-heading">
+                Adventurer
+                <span className="ui-select-count">
+                    {opened} / {roster.length}
+                </span>
+            </h2>
+            {fixed && (
+                <div className="ui-select-fixed-note">
+                    <ItemIcon objId={getStartingWeaponIcon(getCharacter(fixed))} size={28} />
+                    Everyone plays the {getCharacter(fixed).name} here.
+                </div>
+            )}
+            <div className="ui-select-scroll" aria-hidden={fixed !== undefined}>
+                {STYLES.map((style) => {
+                    const treasure = getClassTreasure(style);
+                    return (
+                        <div key={style} className="ui-style-group">
+                            <div className="ui-style-name">
+                                {STYLE_NAMES[style]}
+                                {treasure && (
+                                    <span className="ui-style-treasure">
+                                        might find the{" "}
+                                        <span style={{ color: RARITIES.veryRare.color }}>
+                                            {treasure.name}
+                                        </span>
+                                    </span>
+                                )}
+                            </div>
+                            <div className="ui-tiles">
+                                {roster
+                                    .filter((c) => c.style === style)
+                                    .map((character) => {
+                                        const selected = character.id === ui.characterId;
+                                        return (
+                                            <button
+                                                key={character.id}
+                                                className={
+                                                    "ui-card ui-tile" +
+                                                    (selected ? " ui-card-selected" : "") +
+                                                    (unlocked.includes(character.id)
+                                                        ? ""
+                                                        : " ui-card-locked")
+                                                }
+                                                aria-label={character.name}
+                                                aria-pressed={selected}
+                                                onMouseMove={() => setPeek(character.id)}
+                                                onFocus={() => setPeek(character.id)}
+                                                onClick={() => {
+                                                    setPeek(character.id);
+                                                    client.selectCharacter(character.id);
+                                                }}
+                                            >
+                                                <ItemIcon
+                                                    objId={
+                                                        character.equipment[EquipSlot.TORSO] ??
+                                                        getStartingWeaponIcon(character)
+                                                    }
+                                                    size={34}
+                                                />
+                                                <span className="ui-tile-badge">
+                                                    <ItemIcon
+                                                        objId={getStartingWeaponIcon(character)}
+                                                        size={18}
+                                                    />
+                                                </span>
+                                            </button>
+                                        );
+                                    })}
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+            <PetRow ui={ui} client={client} />
+            <AdventurerDetails
+                key={shown}
+                save={ui.save}
+                character={getCharacter(shown)}
+                onFavourite={fixed ? undefined : () => client.toggleFavouriteCharacter(shown)}
+            />
+        </div>
+    );
+}
+
+// The pet to take along, from those found (looks only): none until one's been found
+function PetRow({ ui, client }: ScreenProps): JSX.Element | null {
+    const found = getFoundPets(ui.save.trophies);
+    if (found.length === 0) {
+        return null;
+    }
+    const chosen = ui.save.pet;
+    const name = chosen ? getPetTrophy(PET_BY_ID.get(chosen)!).name : "None";
+    return (
+        <div className="ui-pet-row">
+            <span className="ui-pet-label">
+                Pet: <span className="ui-pet-name">{name}</span>
+            </span>
+            <div className="ui-pet-tiles">
+                <button
+                    className={"ui-card ui-pet-tile" + (chosen ? "" : " ui-card-selected")}
+                    aria-label="No pet"
+                    aria-pressed={!chosen}
+                    title="No pet"
+                    onClick={() => client.selectPet(undefined)}
+                >
+                    <span className="ui-pet-none">None</span>
+                </button>
+                {found.map((pet) => {
+                    const trophy = getPetTrophy(pet);
+                    const selected = pet.id === chosen;
+                    return (
+                        <button
+                            key={pet.id}
+                            className={
+                                "ui-card ui-pet-tile" + (selected ? " ui-card-selected" : "")
+                            }
+                            aria-label={trophy.name}
+                            aria-pressed={selected}
+                            title={trophy.name}
+                            onClick={() => client.selectPet(pet.id)}
+                        >
+                            <ItemIcon objId={trophy.objId} size={26} />
+                        </button>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
+// onFavourite: the favourite button's (not on a map's own adventurer, who can't be picked)
+function AdventurerDetails({
+    save,
+    character,
+    onFavourite,
+}: {
+    save: SaveData;
+    character: CharacterDef;
+    onFavourite?: () => void;
+}): JSX.Element {
+    const unlocked = save.unlockedCharacters.includes(character.id);
+    const favourite = save.favouriteCharacter === character.id;
+    const bonus = formatStats(character.bonus);
+    return (
+        <div className="ui-select-details">
+            <div className="ui-select-details-head">
+                <ItemIcon objId={getStartingWeaponIcon(character)} size={36} />
+                <div>
+                    <div className="ui-card-title">{character.name}</div>
+                    <div className="ui-card-style">{STYLE_NAMES[character.style]}</div>
+                </div>
+                {onFavourite && unlocked && (
+                    // The label says whether it's on, so no aria-pressed as well
+                    <button
+                        className={
+                            "ui-button ui-button-small ui-favourite" +
+                            (favourite ? " ui-favourite-on" : "")
+                        }
+                        title={
+                            favourite
+                                ? "The game starts on this adventurer. Click to stop."
+                                : "Start the game on this adventurer"
+                        }
+                        onClick={onFavourite}
+                    >
+                        {favourite ? "Favourite" : "Make favourite"}
+                    </button>
+                )}
+            </div>
+            <div className="ui-card-text">{character.description}</div>
+            {/* What they bring, a stat to a line */}
+            {bonus.length > 0 && (
+                <div className="ui-select-bonus">
+                    {bonus.map((text) => (
+                        <StatLine key={text} text={text} />
+                    ))}
+                </div>
+            )}
+            {!unlocked && character.unlock && (
+                <div className="ui-card-cost">{describeUnlockTask(character.unlock)} to unlock</div>
+            )}
+        </div>
+    );
+}
+
+interface MapGroup {
+    name: string;
+    hint?: string;
+    maps: MapDef[];
+}
+
+// The map screen's tabs, each a list or two of maps in the order they open
+const MAP_TABS: { id: string; name: string; groups: MapGroup[] }[] = [
+    {
+        id: "campaign",
+        name: "Campaign",
+        groups: [
+            { name: "Seasonal", hint: "open from the start", maps: SEASONAL_MAPS },
+            { name: "Campaign", maps: CAMPAIGN_MAPS },
+        ],
+    },
+    {
+        id: "bosses",
+        name: "Bosses",
+        groups: [
+            { name: "Boss fights", hint: "once their map's beaten", maps: FIGHT_MAPS },
+            { name: "Raids", hint: "room by room, open from the start", maps: RAID_MAPS },
+        ],
+    },
+    {
+        id: "fun",
+        name: "Fun",
+        groups: [{ name: "Fun maps", hint: "endless, open from the start", maps: FUN_MAPS }],
+    },
+    {
+        id: "dev",
+        name: "Dev",
+        groups: [{ name: "Dev maps", hint: "dev server only", maps: DEV_MAPS }],
+    },
+]
+    .map((tab) => ({ ...tab, groups: tab.groups.filter((group) => group.maps.length > 0) }))
+    .filter((tab) => tab.groups.length > 0);
+
+const MAP_TAB_IDS = MAP_TABS.map((tab) => tab.id);
+
+function getMapTab(mapId: string): string {
+    return (
+        MAP_TABS.find((tab) => tab.groups.some((group) => group.maps.some((m) => m.id === mapId)))
+            ?.id ?? MAP_TABS[0].id
+    );
+}
+
+// The maps by kind, a tab for each, two to a row, with details pinned below
+// like the adventurers'. Every tab's page is laid out at once, one over
+// another, so the list is the same height whichever's open, and the details
+// have a fixed place below it: what's pointed at only changes what they say,
+// never where a map is.
+function MapPanel({ ui, client }: ScreenProps): JSX.Element {
+    const save = ui.save;
+    const [peek, setPeek] = useState<string>();
+    const [open, setOpen] = useState(() => getMapTab(ui.mapId));
+    // A tab's own maps: the details go back to the one picked, not one from the last tab
+    const openTab = (id: string) => {
+        setOpen(id);
+        setPeek(undefined);
+    };
+    const beaten = CAMPAIGN_MAPS.filter((m) => (save.mapVictories[m.id] ?? 0) > 0).length;
+    const tile = (map: MapDef) => {
+        const selected = map.id === ui.mapId;
+        return (
+            <button
+                key={map.id}
+                className={
+                    "ui-card ui-map-tile" +
+                    (selected ? " ui-card-selected" : "") +
+                    (isMapUnlocked(save, map.id) ? "" : " ui-card-locked")
+                }
+                aria-pressed={selected}
+                onMouseMove={() => setPeek(map.id)}
+                onFocus={() => setPeek(map.id)}
+                onBlur={() => setPeek(undefined)}
+                onClick={() => {
+                    setPeek(map.id);
+                    client.selectMap(map.id);
+                }}
+            >
+                <ItemIcon objId={map.iconObjId} size={20} />
+                <span className="ui-map-name">{map.name}</span>
+                {(save.hardVictories[map.id] ?? 0) > 0 ? (
+                    <span className="ui-beaten ui-beaten-hard" aria-label="Beaten on hard" />
+                ) : (
+                    (save.mapVictories[map.id] ?? 0) > 0 && (
+                        <span className="ui-beaten" aria-label="Beaten" />
+                    )
+                )}
+            </button>
+        );
+    };
+    return (
+        <div
+            className="ui-panel rs-border rs-background ui-select-panel ui-select-maps"
+            onMouseLeave={stopPeeking(setPeek)}
+        >
+            <h2 className="ui-select-heading">
+                Map
+                <span className="ui-select-count">
+                    {beaten} / {CAMPAIGN_MAPS.length} beaten
+                </span>
+            </h2>
+            <div
+                className="ui-tabs ui-map-tabs"
+                role="tablist"
+                aria-label="Kinds of map"
+                onKeyDown={(event) => {
+                    const next = getTabFromKey(event.key, MAP_TAB_IDS, open);
+                    if (next) {
+                        event.preventDefault();
+                        openTab(next);
+                        event.currentTarget
+                            .querySelector<HTMLButtonElement>(`#map-tab-${next}`)
+                            ?.focus();
+                    }
+                }}
+            >
+                {MAP_TABS.map((tab) => (
+                    <button
+                        key={tab.id}
+                        id={`map-tab-${tab.id}`}
+                        className="ui-button"
+                        role="tab"
+                        tabIndex={open === tab.id ? 0 : -1}
+                        aria-selected={open === tab.id}
+                        aria-controls={`map-page-${tab.id}`}
+                        onClick={() => openTab(tab.id)}
+                    >
+                        {tab.name}
+                    </button>
+                ))}
+            </div>
+            <div className="ui-map-pages">
+                {MAP_TABS.map((tab) => (
+                    <div
+                        key={tab.id}
+                        id={`map-page-${tab.id}`}
+                        className="ui-select-scroll ui-map-page"
+                        role="tabpanel"
+                        aria-labelledby={`map-tab-${tab.id}`}
+                        aria-hidden={open !== tab.id}
+                    >
+                        {tab.groups.map((group) => (
+                            <div key={group.name} className="ui-style-group">
+                                <div className="ui-style-name">
+                                    {group.name}
+                                    {group.hint && (
+                                        <span className="ui-style-treasure">{group.hint}</span>
+                                    )}
+                                </div>
+                                <div className="ui-map-list">{group.maps.map(tile)}</div>
+                            </div>
+                        ))}
+                    </div>
+                ))}
+            </div>
+            {/* Its own for each map, so a long one scrolled down doesn't leave the next scrolled */}
+            <MapDetails key={peek ?? ui.mapId} save={save} map={getMap(peek ?? ui.mapId)} />
+        </div>
+    );
+}
+
+function MapDetails({ save, map }: { save: SaveData; map: MapDef }): JSX.Element {
+    const wins = save.mapVictories[map.id] ?? 0;
+    const unlocked = isMapUnlocked(save, map.id);
+    const endless = save.endlessBest[map.id];
+    const hardWins = save.hardVictories[map.id] ?? 0;
+    const hardEndless = save.hardEndlessBest[map.id];
+    return (
+        <div className="ui-select-details">
+            <div className="ui-select-details-head">
+                <ItemIcon objId={map.iconObjId} size={36} />
+                <div>
+                    <div className="ui-card-title">{map.name}</div>
+                    <div className={unlocked ? "ui-card-style" : "ui-card-cost"}>
+                        {map.fun
+                            ? map.fun.character
+                                ? `Fun map, endless. You play as ${getCharacter(map.fun.character).name}.`
+                                : "Fun map, endless"
+                            : !unlocked
+                              ? `Beat ${getMap(map.fight?.requires ?? MAPS[MAPS.indexOf(map) - 1].id).name} to unlock`
+                              : map.fight
+                                ? `Boss fight. You play as the ${getCharacter(map.fight.character).name}` +
+                                  (wins > 0
+                                      ? `, beaten ${wins === 1 ? "once" : `${wins} times`}.`
+                                      : ".")
+                                : wins > 0
+                                  ? `Beaten ${wins === 1 ? "once" : `${wins} times`}`
+                                  : "Not beaten yet"}
+                    </div>
+                    {endless && (
+                        <div className="ui-card-style">
+                            Endless best: round {endless.round}, {formatTime(endless.seconds)}
+                        </div>
+                    )}
+                    {hardWins > 0 && (
+                        <div className="ui-card-style">
+                            Beaten on hard {hardWins === 1 ? "once" : `${hardWins} times`}
+                        </div>
+                    )}
+                    {hardEndless && (
+                        <div className="ui-card-style">
+                            Hard endless best: round {hardEndless.round},{" "}
+                            {formatTime(hardEndless.seconds)}
+                        </div>
+                    )}
+                </div>
+            </div>
+            <div className="ui-card-text ui-card-description">
+                <RichText text={map.description} />
+            </div>
+            <MapTasks save={save} mapId={map.id} />
+        </div>
+    );
+}
+
+// A description's own formatting: a blank line between paragraphs (the CSS keeps line breaks),
+// and **bold**
+function RichText({ text }: { text: string }): JSX.Element {
+    return (
+        <>
+            {text
+                .split(/\*\*(.+?)\*\*/g)
+                .map((part, i) => (i % 2 === 1 ? <strong key={i}>{part}</strong> : part))}
+        </>
+    );
+}
+
+// What a map's tasks bring in, task by task: adventurers (by the weapon they
+// start with) and items, faded until they're earned
+function MapTasks({ save, mapId }: { save: SaveData; mapId: string }): JSX.Element {
+    const earned = (reward: MapReward) =>
+        reward.kind === "character"
+            ? save.unlockedCharacters.includes(reward.id)
+            : save.unlockedItems.includes(reward.id);
+    const tasks = new Map<string, MapReward[]>();
+    for (const reward of getMapRewards(mapId)) {
+        const task = describeUnlockTask(reward.unlock, false);
+        tasks.set(task, [...(tasks.get(task) ?? []), reward]);
+    }
+    return (
+        <div className="ui-tasks">
+            {[...tasks].map(([task, rewards]) => (
+                <div
+                    key={task}
+                    className={"ui-task" + (rewards.every(earned) ? " ui-task-done" : "")}
+                >
+                    <span className="ui-task-name">{task}:</span>
+                    {rewards.map((reward) => (
+                        <span
+                            key={reward.kind + reward.id}
+                            className={"ui-reward" + (earned(reward) ? "" : " ui-reward-locked")}
+                        >
+                            <ItemIcon
+                                objId={reward.iconObjId}
+                                spriteId={reward.iconSpriteId}
+                                size={20}
+                            />
+                            {reward.name}
+                        </span>
+                    ))}
+                </div>
+            ))}
+        </div>
+    );
+}
+
+// The tab an arrow key, Home or End moves to from the one that's open, round from the last to
+// the first and back
+function getTabFromKey<T>(key: string, tabs: readonly T[], open: T): T | undefined {
+    const index = tabs.indexOf(open);
+    return key === "ArrowRight"
+        ? tabs[(index + 1) % tabs.length]
+        : key === "ArrowLeft"
+          ? tabs[(index + tabs.length - 1) % tabs.length]
+          : key === "Home"
+            ? tabs[0]
+            : key === "End"
+              ? tabs[tabs.length - 1]
+              : undefined;
+}
+
+function ShopScreen({ ui, client }: ScreenProps): JSX.Element {
+    const save = ui.save;
+    const [style, setStyle] = useState<CombatStyle>(() => getCharacter(ui.characterId).style);
+    const page = save.skillPages[style];
+    const coins = getSkillCoins(save, style);
+    return (
+        <div className="ui-fill ui-center">
+            <div className="ui-panel rs-border rs-background ui-shop">
+                <h2>Skills</h2>
+                <p className="ui-subtle ui-shop-help">
+                    Melee, Ranged and Magic are separate skill presets, used automatically by
+                    adventurers of that combat style.
+                </p>
+                <div
+                    className="ui-row ui-tabs ui-shop-tabs"
+                    role="tablist"
+                    aria-label="Skill presets"
+                    onKeyDown={(event) => {
+                        const next = getTabFromKey(event.key, STYLES, style);
+                        if (next) {
+                            event.preventDefault();
+                            setStyle(next);
+                            event.currentTarget
+                                .querySelector<HTMLButtonElement>(`#skills-tab-${next}`)
+                                ?.focus();
+                        }
+                    }}
+                >
+                    {STYLES.map((tab) => (
+                        <button
+                            key={tab}
+                            id={`skills-tab-${tab}`}
+                            className="ui-button"
+                            role="tab"
+                            tabIndex={style === tab ? 0 : -1}
+                            aria-selected={style === tab}
+                            aria-controls="skills-page"
+                            onClick={() => setStyle(tab)}
+                        >
+                            {STYLE_NAMES[tab]} preset
+                        </button>
+                    ))}
+                </div>
+                <div
+                    className="ui-shop-grid"
+                    id="skills-page"
+                    role="tabpanel"
+                    aria-labelledby={`skills-tab-${style}`}
+                >
+                    {SHOP_UPGRADES.map((upgrade) => {
+                        const rank = page.upgrades[upgrade.id] ?? 0;
+                        const cost = getNextUpgradeCost(save, upgrade.id, style);
+                        const affordable = cost !== undefined && coins >= cost;
+                        return (
+                            <div key={upgrade.id} className="ui-shop-entry">
+                                <button
+                                    className={
+                                        "ui-card ui-shop-card" + (affordable ? "" : " ui-card-dim")
+                                    }
+                                    aria-disabled={!affordable}
+                                    title={
+                                        rank > 0 && !isCoarsePointer
+                                            ? "Right-click to refund one rank"
+                                            : undefined
+                                    }
+                                    onClick={() => {
+                                        if (affordable) {
+                                            client.buyUpgrade(upgrade.id, style);
+                                        }
+                                    }}
+                                    onContextMenu={(event) => {
+                                        if (rank > 0) {
+                                            event.preventDefault();
+                                            if (!isCoarsePointer) {
+                                                client.refundUpgrade(upgrade.id, style);
+                                            }
+                                        }
+                                    }}
+                                >
+                                    <div className="ui-card-title">{upgrade.name}</div>
+                                    <div className="ui-card-text">
+                                        <StatLine
+                                            text={upgrade.description}
+                                            statKey={upgrade.stat}
+                                        />
+                                    </div>
+                                    <div className="ui-pips">
+                                        {Array.from({ length: upgrade.maxRank }, (_, i) => (
+                                            <span
+                                                key={i}
+                                                className={i < rank ? "ui-pip ui-pip-on" : "ui-pip"}
+                                            />
+                                        ))}
+                                    </div>
+                                    <div className="ui-card-cost">
+                                        {cost === undefined ? "Maxed" : <Coins amount={cost} />}
+                                    </div>
+                                </button>
+                                {rank > 0 && (
+                                    <button
+                                        className="ui-shop-refund"
+                                        aria-label={`Refund one ${upgrade.name} rank`}
+                                        title={`Refund one ${upgrade.name} rank`}
+                                        onClick={() => client.refundUpgrade(upgrade.id, style)}
+                                    >
+                                        <span className="ui-shop-refund-icon" aria-hidden="true">
+                                            <ItemIcon
+                                                objId={-1}
+                                                spriteId={REFUND_SPRITE}
+                                                size={21}
+                                            />
+                                        </span>
+                                    </button>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+                <div className="ui-row">
+                    <button className="ui-button" onClick={() => client.showScreen("title")}>
+                        Back
+                    </button>
+                    <Coins amount={coins} />
+                    <button
+                        className="ui-button"
+                        disabled={Object.keys(page.upgrades).length === 0}
+                        onClick={() => client.refundUpgrades(style)}
+                    >
+                        Refund all
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function RunScreen({ ui, client }: ScreenProps): JSX.Element {
+    const hud = ui.hud;
+    return (
+        <div className="ui-fill ui-run">
+            <ChoiceCountdown client={client} />
+            {ui.party.length > 0 && <PartyFrames party={ui.party} />}
+            {ui.waitingOn.length > 0 && (ui.overlay === "none" || ui.overlay === "paused") && (
+                <WaitingNote names={ui.waitingOn} />
+            )}
+            {ui.revive && (ui.overlay === "none" || ui.overlay === "paused") && (
+                <ReviveNote revive={ui.revive} />
+            )}
+            {ui.cinematic && (
+                // The opening cinematic: no HUD, and a click or tap anywhere skips it
+                <div
+                    className="ui-cinematic"
+                    onPointerDown={(e) => {
+                        e.preventDefault();
+                        client.skipCinematic();
+                    }}
+                />
+            )}
+            {isCoarsePointer && hud && !ui.cinematic && (
+                <TouchControls
+                    inventory={getMap(hud.mapId).fight ? [] : hud.inventory}
+                    overlay={ui.overlay}
+                    client={client}
+                />
+            )}
+            {/* The inspectable HUD slots sit above the touch movement zone. */}
+            {hud && !ui.cinematic && (
+                <Hud
+                    hud={hud}
+                    client={client}
+                    questTracker={ui.display.questTracker}
+                    damagePanel={ui.display.damagePanel}
+                    disabled={ui.overlay !== "none"}
+                />
+            )}
+            <div className="ui-toasts">
+                {ui.toasts.map((toast) => (
+                    <div key={toast.id} className="ui-toast">
+                        {toast.text}
+                    </div>
+                ))}
+            </div>
+            {ui.overlay === "levelUp" && <LevelUpModal ui={ui} client={client} />}
+            {ui.overlay === "chest" && ui.chest && (
+                <ChestModal
+                    key={ui.chest.uid}
+                    chest={ui.chest}
+                    rerolls={hud?.rerolls ?? 0}
+                    banishes={hud?.banishes ?? 0}
+                    client={client}
+                />
+            )}
+            {ui.overlay === "event" && ui.event && (
+                <RunEventModal key={ui.event.uid} event={ui.event} client={client} />
+            )}
+            {ui.overlay === "paused" && hud && <PauseModal ui={ui} hud={hud} client={client} />}
+            {(ui.overlay === "dead" || ui.overlay === "victory") && (
+                <ResultModal ui={ui} client={client} />
+            )}
+        </div>
+    );
+}
+
+// One of the HUD's numbers (hitpoints, xp, the clock, damage), which change many
+// times a second. A part of the HUD draws again only when what it picks out does:
+// GameClient keeps what hasn't changed the same object.
+function useHudNumber<T>(client: GameClient, pick: (numbers: HudNumbers) => T): T | undefined {
+    const store = client.store;
+    return useSyncExternalStore(store.subscribeNumbers, () => {
+        const numbers = store.getNumbers();
+        return numbers && pick(numbers);
+    });
+}
+
+function ChoiceCountdown({ client }: { client: GameClient }): JSX.Element | null {
+    const seconds = useHudNumber(client, (n) => n.decisionSeconds);
+    if (seconds === undefined) {
+        return null;
+    }
+    return (
+        <div
+            className={"ui-choice-countdown" + (seconds <= 5 ? " ui-choice-countdown-soon" : "")}
+            role="timer"
+            aria-label={`Party choosing. Next automatic choice in ${seconds} seconds`}
+        >
+            <span className="ui-choice-countdown-label">Party choosing</span>
+            <span className="ui-choice-countdown-time">Auto-choice in {seconds}s</span>
+        </div>
+    );
+}
+
+// A random event: what's for sale against the coins carried
+function RunEventModal({
+    event,
+    client,
+}: {
+    event: NonNullable<UiSnapshot["event"]>;
+    client: GameClient;
+}): JSX.Element {
+    const coins = useHudNumber(client, (n) => n.coins) ?? 0;
+    return <EventModal event={event} coins={coins} client={client} />;
+}
+
+// "3", "max", and past the last level (endless runs) "+2"
+function formatSlotLevel(slot: SlotView): string {
+    if (slot.level > slot.maxLevel) {
+        return `+${slot.level - slot.maxLevel}`;
+    }
+    return slot.level === slot.maxLevel ? "max" : String(slot.level);
+}
+
+// A weapon or passive in the HUD, with what it does on a card shown while
+// it's pointed at
+const Slots = memo(function Slots({
+    slots,
+    max,
+    disabled,
+}: {
+    slots: SlotView[];
+    max: number;
+    disabled: boolean;
+}): JSX.Element {
+    return (
+        <div className="ui-slots">
+            {Array.from({ length: max }, (_, i) => {
+                const slot = slots[i];
+                return (
+                    <DescriptionButton
+                        key={i}
+                        itemId={slot?.id}
+                        disabled={!slot || disabled}
+                        aria-label={slot?.name ?? `Empty slot ${i + 1}`}
+                        className={"ui-slot" + (slot?.evolution?.ready ? " ui-slot-evolve" : "")}
+                        style={slot ? { borderColor: slot.rarityColor } : undefined}
+                        description={
+                            slot && (
+                                <>
+                                    <div style={{ color: slot.rarityColor }}>{slot.name}</div>
+                                    <div className="ui-slot-tip-level">
+                                        {slot.level >= slot.maxLevel
+                                            ? "Max level"
+                                            : `Level ${slot.level} of ${slot.maxLevel}`}
+                                    </div>
+                                    {slot.stats?.map((line) => (
+                                        <StatLine key={line} text={line} />
+                                    ))}
+                                    {slot.detail && <div>{slot.detail}</div>}
+                                    {slot.evolution && <EvolutionLine {...slot.evolution} />}
+                                </>
+                            )
+                        }
+                    >
+                        {slot && (
+                            <>
+                                <ItemIcon
+                                    objId={slot.iconObjId}
+                                    spriteId={slot.iconSpriteId}
+                                    size={30}
+                                />
+                                <span className="ui-slot-level">{formatSlotLevel(slot)}</span>
+                            </>
+                        )}
+                    </DescriptionButton>
+                );
+            })}
+        </div>
+    );
+});
+
+// How far a weapon has got towards its evolution, each half ticked off
+function EvolutionLine({
+    passive,
+    maxed,
+    hasPassive,
+    ready,
+}: NonNullable<SlotView["evolution"]>): JSX.Element {
+    return ready ? (
+        <div className="ui-evolve-ready">Ready to evolve</div>
+    ) : (
+        <div className="ui-evolve-line">
+            Evolves with:{" "}
+            <span className={maxed ? "ui-evolve-done" : undefined}>
+                {maxed ? "✓" : "✗"} Max level
+            </span>
+            ,{" "}
+            <span className={hasPassive ? "ui-evolve-done" : undefined}>
+                {hasPassive ? "✓" : "✗"} {passive}
+            </span>
+        </div>
+    );
+}
+
+// Worn gear, small, under the weapons and passives
+const GearSlots = memo(function GearSlots({
+    gear,
+    disabled,
+}: {
+    gear: GearSlotView[];
+    disabled: boolean;
+}): JSX.Element {
+    return (
+        <div className="ui-slots ui-gear-slots">
+            {gear.map((slot) => (
+                <DescriptionButton
+                    key={slot.slot}
+                    itemId={slot.item?.id}
+                    disabled={!slot.item || disabled}
+                    aria-label={slot.item?.name ?? `${slot.name} (empty)`}
+                    className={"ui-slot ui-gear-slot" + (slot.item ? "" : " ui-gear-slot-empty")}
+                    style={slot.item ? { borderColor: slot.item.rarity.color } : undefined}
+                    description={slot.item && <ItemDescription item={slot.item} />}
+                >
+                    {slot.item ? (
+                        <ItemIcon objId={slot.item.objId} size={22} />
+                    ) : (
+                        <ItemIcon
+                            spriteId={GEAR_SLOT_BY_ID.get(slot.slot)!.iconSpriteId}
+                            size={22}
+                        />
+                    )}
+                </DescriptionButton>
+            ))}
+        </div>
+    );
+});
+
+// Utility items, used with 1-4 (a controller's shoulder buttons) or a click
+const Inventory = memo(function Inventory({
+    inventory,
+    client,
+    disabled,
+}: {
+    inventory: InventorySlotView[];
+    client: GameClient;
+    disabled: boolean;
+}): JSX.Element {
+    return (
+        <div className="ui-inventory">
+            {inventory.map((slot, i) => (
+                <InventoryItem
+                    key={i}
+                    slot={slot}
+                    index={i}
+                    disabled={disabled}
+                    onUse={() => client.useItem(i)}
+                />
+            ))}
+        </div>
+    );
+});
+
+function Buffs({ buffs }: { buffs: BuffView[] }): JSX.Element {
+    return (
+        <div className="ui-buffs">
+            {buffs.map((buff) => (
+                <div
+                    key={buff.id}
+                    className={
+                        "ui-buff" +
+                        (buff.harmful ? " ui-buff-harmful" : "") +
+                        (buff.secondsLeft === undefined ? " ui-buff-untimed" : "")
+                    }
+                    title={buff.name}
+                >
+                    <ItemIcon objId={buff.objId} size={24} />
+                    {buff.secondsLeft !== undefined && (
+                        <>
+                            <span>{buff.secondsLeft}s</span>
+                            <div
+                                className="ui-buff-bar"
+                                style={{ transform: `scaleX(${buff.fraction})` }}
+                            />
+                        </>
+                    )}
+                </div>
+            ))}
+        </div>
+    );
+}
+
+// The HUD's slower parts draw again only when what the hero has changes; the
+// numbers are their own components (useHudNumber)
+const Hud = memo(function Hud({
+    hud,
+    client,
+    questTracker,
+    damagePanel,
+    disabled,
+}: {
+    hud: HudView;
+    client: GameClient;
+    questTracker: boolean;
+    damagePanel: boolean;
+    disabled: boolean;
+}): JSX.Element {
+    return (
+        <>
+            <XpBar level={hud.level} client={client} />
+            <div className="ui-hud-top">
+                <div className="ui-hud-left">
+                    <Slots slots={hud.weapons} max={hud.maxWeapons} disabled={disabled} />
+                    <Slots slots={hud.passives} max={hud.maxPassives} disabled={disabled} />
+                    <GearSlots gear={hud.gear} disabled={disabled} />
+                </div>
+                <RunTimer client={client} />
+                <div className="ui-hud-right">
+                    <Minimap client={client} />
+                    <KillsAndCoins client={client} />
+                    {hud.round !== undefined && <div className="ui-round">Round {hud.round}</div>}
+                    <RaidRoomInfo client={client} />
+                    <HudQuests open={questTracker} client={client} />
+                    <DamagePanel weapons={hud.weapons} open={damagePanel} client={client} />
+                </div>
+            </div>
+            <BossBar mapId={hud.mapId} client={client} />
+            <div className="ui-hud-bottom">
+                <HudBuffs client={client} />
+                <div className="ui-hud-actions">
+                    {/* A boss fight has no items, only its own button */}
+                    {!getMap(hud.mapId).fight && (
+                        <Inventory inventory={hud.inventory} client={client} disabled={disabled} />
+                    )}
+                    <AbilityButton client={client} />
+                </div>
+                <HpBar client={client} />
+            </div>
+        </>
+    );
+});
+
+// Scaled rather than resized, so it doesn't lay the page out again as it fills
+function XpBar({ level, client }: { level: number; client: GameClient }): JSX.Element {
+    const xpFraction = useHudNumber(client, (n) => n.xpFraction) ?? 0;
+    return (
+        <div className="ui-xp">
+            <div className="ui-xp-fill" style={{ transform: `scaleX(${xpFraction})` }} />
+            <span className="ui-xp-level">Level {level}</span>
+        </div>
+    );
+}
+
+function RunTimer({ client }: { client: GameClient }): JSX.Element {
+    const seconds = useHudNumber(client, (n) => n.seconds) ?? 0;
+    return <div className="ui-timer">{formatTime(seconds)}</div>;
+}
+
+function KillsAndCoins({ client }: { client: GameClient }): JSX.Element {
+    const kills = useHudNumber(client, (n) => n.kills) ?? 0;
+    const coins = useHudNumber(client, (n) => n.coins) ?? 0;
+    return (
+        <>
+            <div>
+                <span className="ui-skull">☠</span> {kills.toLocaleString()}
+            </div>
+            <Coins amount={coins} />
+        </>
+    );
+}
+
+// A raid's room, of how many, and the raid points the player has
+function RaidRoomInfo({ client }: { client: GameClient }): JSX.Element | null {
+    const room = useHudNumber(client, (n) => n.raidRoom);
+    if (!room) {
+        return null;
+    }
+    return (
+        <>
+            <div className="ui-round">
+                Room {room.number} / {room.count}
+            </div>
+            <div className="ui-raid-points" title="Raid points, for the supply chest">
+                {room.points} pts
+            </div>
+        </>
+    );
+}
+
+function HudQuests({ open, client }: { open: boolean; client: GameClient }): JSX.Element | null {
+    const quests = useHudNumber(client, (n) => n.quests);
+    return quests && quests.length > 0 ? (
+        <QuestTracker quests={quests} open={open} client={client} />
+    ) : null;
+}
+
+function HudBuffs({ client }: { client: GameClient }): JSX.Element | null {
+    const buffs = useHudNumber(client, (n) => n.buffs);
+    return buffs && buffs.length > 0 ? <Buffs buffs={buffs} /> : null;
+}
+
+function HpBar({ client }: { client: GameClient }): JSX.Element | null {
+    const hp = useHudNumber(client, (n) => n.hp);
+    const maxHp = useHudNumber(client, (n) => n.maxHp);
+    const poisoned = useHudNumber(client, (n) => n.poisoned);
+    if (hp === undefined || maxHp === undefined) {
+        return null;
+    }
+    return (
+        <div className={poisoned ? "ui-hp ui-hp-poisoned" : "ui-hp"}>
+            <div className="ui-hp-fill" style={{ transform: `scaleX(${hp / maxHp})` }} />
+            <span>
+                {hp} / {maxHp}
+            </span>
+        </div>
+    );
+}
+
+// The boss's bar while it's out, and a warning in the last minute before it is
+// (in a raid's hall, what the hall wants of you)
+function BossBar({ mapId, client }: { mapId: string; client: GameClient }): JSX.Element | null {
+    const boss = useHudNumber(client, (n) => n.boss);
+    const bossIn = useHudNumber(client, (n) => n.bossIn);
+    const raidRoom = useHudNumber(client, (n) => n.raidRoom);
+    if (!boss) {
+        if (raidRoom) {
+            return raidRoom.waves && bossIn !== undefined ? (
+                <RaidObjective room={raidRoom} bossIn={bossIn} />
+            ) : null;
+        }
+        return bossIn !== undefined && bossIn <= 60 ? (
+            <div className="ui-boss-warning">
+                {getMap(mapId).finalBossWarning} {bossIn}s
+            </div>
+        ) : null;
+    }
+    return (
+        <div className="ui-boss">
+            <div className="ui-boss-name">
+                {boss.name}
+                {boss.enraged && <span className="ui-boss-enraged"> (enraged)</span>}
+                {boss.fight && (
+                    // Keyed on the phase, so a new one plays its pulse from the start
+                    <>
+                        {" "}
+                        <span key={boss.fight.phase} className="ui-boss-phase ui-boss-phase-new">
+                            Phase {boss.fight.phase}/{boss.fight.phases}
+                        </span>
+                    </>
+                )}
+            </div>
+            {boss.fight?.stage === "totems" ? (
+                <div className="ui-boss-totems">
+                    {boss.fight.totems.map((charge, i) => (
+                        <div key={i} className="ui-boss-bar ui-boss-totem">
+                            <div
+                                className="ui-boss-fill ui-boss-fill-totem"
+                                style={{ transform: `scaleX(${charge})` }}
+                            />
+                        </div>
+                    ))}
+                </div>
+            ) : (
+                <div className="ui-boss-bar">
+                    <div
+                        className={
+                            boss.fight && boss.fight.stage !== "hp"
+                                ? "ui-boss-fill ui-boss-fill-shield"
+                                : "ui-boss-fill"
+                        }
+                        style={{ transform: `scaleX(${boss.fraction})` }}
+                    />
+                </div>
+            )}
+            {boss.fight && (
+                <div className="ui-boss-status">
+                    {boss.fight.outOfReach
+                        ? "Out of reach!"
+                        : boss.fight.guard === "stunned"
+                          ? "Stunned!"
+                          : boss.fight.guard === "exposed"
+                            ? "Guard down!"
+                            : (boss.fight.status ??
+                              (boss.fight.stage === "totems"
+                                  ? "Charge the totems!"
+                                  : boss.fight.stage === "finale"
+                                    ? "Stay on your feet!"
+                                    : "Break her shield!"))}
+                    {boss.fight.curseAttacks !== undefined && (
+                        <span className="ui-boss-curse"> Cursed: {boss.fight.curseAttacks}</span>
+                    )}
+                    {boss.fight.parasiteSeconds !== undefined && (
+                        <span className="ui-boss-curse">
+                            {" "}
+                            Parasite: {Math.ceil(boss.fight.parasiteSeconds)}s
+                        </span>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+// The client's minimap frame and compass around a canvas the game draws on
+// (runs face north, so the compass does too)
+const Minimap = memo(function Minimap({ client }: { client: GameClient }): JSX.Element {
+    const canvasRef = useCallback(
+        (canvas: HTMLCanvasElement | null) => client.setMinimapCanvas(canvas),
+        [client],
+    );
+    return (
+        <div className="ui-minimap">
+            <canvas className="ui-minimap-map" ref={canvasRef} />
+            <img className="ui-minimap-frame" src={minimapFrame} />
+            <img className="ui-minimap-compass" src={compass} />
+        </div>
+    );
+});
+
+// A weapon's stats on a level up card: "Damage 10 → 13", the new value green
+// when it's better
+function ChoiceStats({ stats }: { stats: WeaponStatLine[] }): JSX.Element {
+    return (
+        <div className="ui-choice-stats">
+            {stats.map((line) => (
+                <StatLine key={line.label} text={formatWeaponStat(line)} className="ui-choice-stat">
+                    <span className="ui-choice-stat-label">{line.label}</span>{" "}
+                    {line.from !== undefined && <>{line.from} → </>}
+                    <span
+                        className={
+                            line.from === undefined
+                                ? undefined
+                                : line.better
+                                  ? "ui-choice-stat-up"
+                                  : "ui-choice-stat-down"
+                        }
+                    >
+                        {line.value}
+                    </span>
+                </StatLine>
+            ))}
+        </div>
+    );
+}
+
+function LevelUpModal({ ui, client }: ScreenProps): JSX.Element {
+    // The godsword's hilt is picked as the rest of the level up that took it
+    // to its hilt level
+    const hilt = ui.choices.some((choice) => choice.isHilt);
+    const spell = ui.choices.some((choice) => choice.isSpell);
+    const banishes = ui.hud?.banishes ?? 0;
+    return (
+        <div className="ui-modal">
+            <div className="ui-panel rs-border rs-background ui-levelup">
+                <h2>
+                    {spell
+                        ? "Choose your Ancient spell!"
+                        : hilt
+                          ? "Your godsword needs a hilt!"
+                          : "Congratulations, you've advanced a level!"}
+                </h2>
+                <p className="ui-subtle">
+                    {spell
+                        ? "It keeps its level, and it's your only burst this run:"
+                        : hilt
+                          ? "Pick the god whose hilt it takes, and with it its special attack:"
+                          : `You are now level ${ui.hud?.level}. Choose a reward:`}
+                </p>
+                <div className="ui-choices">
+                    {ui.choices.map((choice, i) => (
+                        <div
+                            key={i}
+                            className={"ui-choice-row" + (banishes > 0 ? " ui-has-banish" : "")}
+                        >
+                            <button
+                                className={
+                                    "ui-card ui-choice" +
+                                    (choice.isEvolution ? " ui-choice-evolve" : "") +
+                                    (choice.banished ? " ui-choice-banished" : "")
+                                }
+                                disabled={choice.banished}
+                                style={
+                                    choice.rarity ? { borderColor: choice.rarity.color } : undefined
+                                }
+                                onClick={() => client.choose(i)}
+                            >
+                                <KeyHint keyLabel={String(i + 1)} />
+                                <ItemIcon
+                                    objId={choice.iconObjId}
+                                    spriteId={choice.iconSpriteId}
+                                    size={44}
+                                />
+                                <div className="ui-card-body">
+                                    <div className="ui-card-title">
+                                        {choice.title}
+                                        {choice.banished ? (
+                                            <span className="ui-tag ui-tag-banished">Banished</span>
+                                        ) : (
+                                            choice.isNew && <span className="ui-tag">New!</span>
+                                        )}
+                                        {choice.isEvolution && (
+                                            <span className="ui-tag ui-tag-evolve">Evolution!</span>
+                                        )}
+                                        {choice.isHilt && (
+                                            <span className="ui-tag ui-tag-evolve">
+                                                {choice.isSpell ? "Spell" : "Hilt"}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="ui-card-text">{choice.text}</div>
+                                    {choice.evolves && (
+                                        <div
+                                            className={
+                                                "ui-card-evolves" +
+                                                (choice.evolves.held ? " ui-card-evolves-held" : "")
+                                            }
+                                        >
+                                            {choice.evolves.text}
+                                        </div>
+                                    )}
+                                    {choice.stats && choice.stats.length > 0 && (
+                                        <ChoiceStats stats={choice.stats} />
+                                    )}
+                                    {choice.bossPenalty && (
+                                        <div className="ui-card-penalty">{choice.bossPenalty}</div>
+                                    )}
+                                </div>
+                                {choice.rarity && (
+                                    <span
+                                        className="ui-rarity"
+                                        style={{ color: choice.rarity.color }}
+                                    >
+                                        {choice.rarity.name}
+                                    </span>
+                                )}
+                            </button>
+                            {/* Over the card's corner, under its rarity: a button can't go in a button */}
+                            {choice.banishable && (
+                                <BanishButton
+                                    title={`Never offered ${choice.title} again this run`}
+                                    onBanish={() => client.banish(i)}
+                                />
+                            )}
+                        </div>
+                    ))}
+                </div>
+                {banishes > 0 && (
+                    <div className="ui-subtle ui-banishes">
+                        {banishes} {banishes === 1 ? "banish" : "banishes"} left
+                    </div>
+                )}
+                {!hilt && (
+                    <div className="ui-levelup-actions">
+                        <RerollButton
+                            rerolls={ui.hud?.rerolls ?? 0}
+                            onReroll={() => client.reroll()}
+                        />
+                        {ui.hud?.skip && (
+                            <SkipButton
+                                cost={ui.hud.skip.cost}
+                                affordable={ui.hud.skip.affordable}
+                                onSkip={() => client.skip()}
+                            />
+                        )}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+// The HUD's DPS, and under it each weapon's: click the DPS (or press Tab) to
+// open or shut it. Each weapon's damage a second just now, most first, its
+// share of all of it (a bar and a percentage), and its damage this run.
+// Numbers are short (9.5K, 1.2B), as endless runs reach billions; pointing
+// at one gives it in full.
+function DamagePanel({
+    weapons,
+    open,
+    client,
+}: {
+    weapons: SlotView[];
+    open: boolean;
+    client: GameClient;
+}): JSX.Element {
+    const totalDps = useHudNumber(client, (n) => n.dps) ?? 0;
+    const otherDps = useHudNumber(client, (n) => n.otherDps) ?? 0;
+    const weaponDamage = useHudNumber(client, (n) => n.weaponDamage);
+    const damageOf = (slot: SlotView) => weaponDamage?.[slot.id];
+    const total = weapons.reduce((sum, w) => sum + (damageOf(w)?.dps ?? 0), otherDps);
+    // Most damage a second first; ties (weapons yet to hit) keep the HUD's order
+    const rows = [...weapons].sort((a, b) => (damageOf(b)?.dps ?? 0) - (damageOf(a)?.dps ?? 0));
+    return (
+        <div className="ui-damage">
+            <button
+                className="ui-dps"
+                onClick={() => client.toggleDamagePanel()}
+                title="Show or hide each weapon's damage (Tab)"
+            >
+                <span className="ui-dps-label">DPS</span> {formatCompact(totalDps)}{" "}
+                <span className="ui-dps-toggle">{open ? "▾" : "▸"}</span>
+            </button>
+            {open && (
+                <div className="ui-damage-panel">
+                    <div className="ui-damage-head">
+                        <span />
+                        <span />
+                        <span>Share</span>
+                        <span>DPS</span>
+                        <span>Total</span>
+                    </div>
+                    {rows.map((slot) => {
+                        const dps = damageOf(slot)?.dps ?? 0;
+                        const damage = damageOf(slot)?.damage ?? 0;
+                        return (
+                            <div key={slot.id} className="ui-damage-row">
+                                <ItemIcon
+                                    objId={slot.iconObjId}
+                                    spriteId={slot.iconSpriteId}
+                                    size={24}
+                                />
+                                <span className="ui-damage-weapon">
+                                    <span
+                                        className="ui-damage-name"
+                                        style={{ color: slot.rarityColor }}
+                                    >
+                                        {slot.name}
+                                    </span>
+                                    <span className="ui-damage-bar">
+                                        <span
+                                            style={{
+                                                width: `${total > 0 ? (dps / total) * 100 : 0}%`,
+                                            }}
+                                        />
+                                    </span>
+                                </span>
+                                <span className="ui-damage-share">{formatShare(dps, total)}</span>
+                                <span className="ui-damage-dps" title={exact(dps)}>
+                                    {formatCompact(dps)}
+                                </span>
+                                <span className="ui-damage-total" title={exact(damage)}>
+                                    {formatCompact(damage)}
+                                </span>
+                            </div>
+                        );
+                    })}
+                    {otherDps >= 0.05 && (
+                        <div className="ui-damage-row ui-damage-other">
+                            <span />
+                            <span className="ui-damage-weapon" title="Items, power-ups and recoil">
+                                Other
+                            </span>
+                            <span className="ui-damage-share">{formatShare(otherDps, total)}</span>
+                            <span className="ui-damage-dps" title={exact(otherDps)}>
+                                {formatCompact(otherDps)}
+                            </span>
+                            <span />
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function exact(value: number): string {
+    return Math.round(value).toLocaleString();
+}
+
+// The quests this run is getting on with, under the minimap: click the title
+// (or press Q) to fold it away
+function QuestTracker({
+    quests,
+    open,
+    client,
+}: {
+    quests: QuestTrackView[];
+    open: boolean;
+    client: GameClient;
+}): JSX.Element {
+    return (
+        <div className="ui-quest-tracker">
+            <button
+                className="ui-quest-tracker-title"
+                onClick={() => client.toggleQuestTracker()}
+                title="Show or hide the quests (Q)"
+            >
+                Quests {open ? "▾" : "▸"}
+            </button>
+            {open && quests.map((quest) => <QuestTrack key={quest.id} quest={quest} />)}
+        </div>
+    );
+}
+
+// Kept from the last update while its progress is the same (shareUnchanged)
+const QuestTrack = memo(function QuestTrack({ quest }: { quest: QuestTrackView }): JSX.Element {
+    return (
+        <div className={"ui-quest-track " + questTrackClass(quest)} title={quest.task}>
+            <span className="ui-quest-track-name">{quest.name}</span>
+            <span className="ui-quest-track-progress">{formatQuestProgress(quest)}</span>
+        </div>
+    );
+});
+
+// Coloured like the quest tab: red until started, yellow while under way,
+// green once done
+function questTrackClass(quest: QuestTrackView): string {
+    return quest.finished ? "ui-quest-done" : quest.done > 0 ? "ui-quest-started" : "ui-quest-new";
+}
+
+function formatQuestProgress(quest: QuestTrackView): string {
+    return quest.finished
+        ? "Done"
+        : `${quest.done.toLocaleString()} / ${quest.of.toLocaleString()}`;
+}
+
+function PauseModal({
+    ui,
+    hud,
+    client,
+}: {
+    ui: UiSnapshot;
+    hud: HudView;
+    client: GameClient;
+}): JSX.Element {
+    // Co-op's menu doesn't stop the run
+    const coop = ui.party.length > 0;
+    const quests = useHudNumber(client, (n) => n.quests) ?? [];
+    const padKind = usePadKind();
+    // The host can remove anyone still in the run (one who's stopped playing)
+    const kickable =
+        coop && ui.coop.room?.hostId === ui.coop.you
+            ? ui.party.filter((member) => member.id && !member.left)
+            : [];
+    return (
+        <div className={coop ? "ui-modal ui-modal-clear" : "ui-modal"}>
+            <div className="ui-panel rs-border rs-background ui-pause">
+                <h2>{coop ? "Menu" : "Paused"}</h2>
+                {coop && <p className="ui-subtle">The run carries on while you're in here.</p>}
+                {ui.saveBlock && ui.saveBlockClosed && (
+                    <p className="ui-subtle">
+                        <button
+                            className="ui-version ui-save-off"
+                            onClick={() => client.showSaveBlock()}
+                        >
+                            Not saving
+                        </button>
+                    </p>
+                )}
+                <div className="ui-pause-columns">
+                    <div className="ui-pause-column">
+                        <div className="ui-pause-list">
+                            {[...hud.weapons, ...hud.passives].map((slot) => (
+                                <div key={slot.id} className="ui-pause-item">
+                                    <ItemIcon
+                                        objId={slot.iconObjId}
+                                        spriteId={slot.iconSpriteId}
+                                        size={28}
+                                    />
+                                    {/* The name, and what it does under it */}
+                                    <span className="ui-pause-name">
+                                        <span style={{ color: slot.rarityColor }}>{slot.name}</span>
+                                        <span className="ui-pause-detail">
+                                            {[...(slot.stats ?? []), slot.detail]
+                                                .filter((text): text is string => Boolean(text))
+                                                .map((text, i) => (
+                                                    <StatLine key={i} text={text} />
+                                                ))}
+                                        </span>
+                                        {slot.evolution && <EvolutionLine {...slot.evolution} />}
+                                    </span>
+                                    <span className="ui-pause-level">
+                                        {slot.level >= slot.maxLevel
+                                            ? "max"
+                                            : `level ${slot.level}`}
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+                        {hud.stats.length > 0 && (
+                            <>
+                                <h3 className="ui-pause-heading">Your stats</h3>
+                                <div className="ui-pause-stats">
+                                    {hud.stats.map((line) => (
+                                        <StatLine key={line} text={line} />
+                                    ))}
+                                </div>
+                            </>
+                        )}
+                        {hud.gear.some((slot) => slot.item) && (
+                            <>
+                                <h3 className="ui-pause-heading">Worn equipment</h3>
+                                <div className="ui-pause-list">
+                                    {hud.gear.map(
+                                        ({ slot, item }) =>
+                                            item && (
+                                                <div key={slot} className="ui-pause-item">
+                                                    <ItemIcon objId={item.objId} size={28} />
+                                                    <span className="ui-pause-name">
+                                                        <span style={{ color: item.rarity.color }}>
+                                                            {item.name}
+                                                        </span>
+                                                        <span className="ui-pause-detail">
+                                                            {item.lines.map((line, i) => (
+                                                                <StatLine key={i} text={line} />
+                                                            ))}
+                                                            {item.set && (
+                                                                <span
+                                                                    className={
+                                                                        "ui-pause-set" +
+                                                                        (item.set.active
+                                                                            ? " ui-pause-set-on"
+                                                                            : "")
+                                                                    }
+                                                                >
+                                                                    <StatLine
+                                                                        text={item.set.text}
+                                                                    />
+                                                                </span>
+                                                            )}
+                                                        </span>
+                                                    </span>
+                                                </div>
+                                            ),
+                                    )}
+                                </div>
+                            </>
+                        )}
+                    </div>
+                    <div className="ui-pause-column">
+                        {quests.length > 0 && (
+                            <>
+                                <h3 className="ui-pause-heading">Quests</h3>
+                                <div className="ui-pause-list">
+                                    {quests.map((quest) => (
+                                        <div
+                                            key={quest.id}
+                                            className={"ui-pause-quest " + questTrackClass(quest)}
+                                        >
+                                            <span className="ui-quest-name">{quest.name}</span>
+                                            <span className="ui-pause-detail">{quest.task}</span>
+                                            <span className="ui-quest-progress">
+                                                {formatQuestProgress(quest)}
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </>
+                        )}
+                        {kickable.length > 0 && (
+                            <>
+                                <h3 className="ui-pause-heading">Party</h3>
+                                <div className="ui-pause-list">
+                                    {kickable.map((member) => (
+                                        <div key={member.id} className="ui-pause-item">
+                                            <span className="ui-pause-name">{member.name}</span>
+                                            <button
+                                                className="ui-button ui-button-small ui-coop-kick"
+                                                title={`Remove ${member.name} from the run`}
+                                                aria-label={`Kick ${member.name}`}
+                                                onClick={() => client.kickPlayer(member.id!)}
+                                            >
+                                                Kick
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </>
+                        )}
+                        {padKind && (
+                            <>
+                                <h3 className="ui-pause-heading">Controller</h3>
+                                <PadControls />
+                            </>
+                        )}
+                        <h3 className="ui-pause-heading">Settings</h3>
+                        <SoundSettings
+                            ui={ui}
+                            client={client}
+                            music={getMap(ui.mapId).music !== undefined}
+                        />
+                        <PickupTimerSetting ui={ui} client={client} />
+                        <AutoPauseSetting ui={ui} client={client} />
+                        <AutoAlchSetting ui={ui} client={client} />
+                        <AutoEquipSetting ui={ui} client={client} />
+                        <MovePredictionSetting ui={ui} client={client} />
+                        <FrameRateSetting ui={ui} client={client} />
+                    </div>
+                </div>
+                <div className="ui-row">
+                    <button
+                        className="ui-button"
+                        title={
+                            coop && ui.coop.room?.hostId === ui.coop.you
+                                ? "You're the host: leaving ends the run for everyone"
+                                : undefined
+                        }
+                        onClick={() => client.quitRun()}
+                    >
+                        {coop ? "Leave the run" : "Give up"}
+                    </button>
+                    <button className="ui-button ui-button-go" onClick={() => client.resume()}>
+                        Resume
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// Co-op's results name everyone else
+const MAX_LISTED_TEAMMATES = 3;
+
+// "Coif, Rune boots and Seers ring", or the first few "and 5 more"
+function listNames(names: string[], most = 3): string {
+    if (names.length === 1) {
+        return names[0];
+    }
+    const shown = names.length > most ? names.slice(0, most - 1) : names.slice(0, -1);
+    const rest =
+        names.length > most ? `${names.length - shown.length} more` : names[names.length - 1];
+    return `${shown.join(", ")} and ${rest}`;
+}
+
+// Damage a second, with a decimal while it's small
+function formatPerSecond(perSecond: number): string {
+    return perSecond < 100_000
+        ? perSecond.toLocaleString(undefined, { maximumFractionDigits: perSecond < 10 ? 1 : 0 })
+        : formatBig(perSecond);
+}
+
+// Big numbers the way OSRS shows a stack: in full up to 99,999, then 100K,
+// then 10M, so an endless run's totals still fit. Past what a stack can hold
+// (10,000M), the damage panel's short form: 12B, 4.6Qa.
+function formatBig(value: number): string {
+    const n = Math.round(value);
+    if (n < 100_000) {
+        return n.toLocaleString();
+    }
+    if (n < 10_000_000) {
+        return `${Math.floor(n / 1000).toLocaleString()}K`;
+    }
+    if (n < 10_000_000_000) {
+        return `${Math.floor(n / 1_000_000).toLocaleString()}M`;
+    }
+    return formatCompact(n);
+}
+
+// A stat's number, shortened when it's big, in full when pointed at
+function Big({ value }: { value: number }): JSX.Element {
+    const n = Math.round(value);
+    return <span title={n >= 100_000 ? n.toLocaleString() : undefined}>{formatBig(n)}</span>;
+}
+
+export function ResultModal({ ui, client }: ScreenProps): JSX.Element {
+    const result = ui.result;
+    const victory = ui.overlay === "victory";
+    const players = result?.players ?? [];
+    // Your own page first (the modal is mounted afresh for each run's result)
+    const [playerIndex, setPlayerIndex] = useState(() =>
+        Math.max(
+            0,
+            players.findIndex((player) => player.isLocal),
+        ),
+    );
+    const player = players[playerIndex];
+    const multiplayer = players.length > 1;
+    const changePlayer = useCallback(
+        (direction: number) =>
+            setPlayerIndex((current) => (current + direction + players.length) % players.length),
+        [players.length],
+    );
+    useEffect(() => {
+        if (!multiplayer) return;
+        const onKeyDown = (event: KeyboardEvent) => {
+            const target = event.target;
+            if (
+                event.altKey ||
+                event.ctrlKey ||
+                event.metaKey ||
+                event.shiftKey ||
+                (target instanceof HTMLElement &&
+                    (target.isContentEditable || target.closest("input, textarea, select")))
+            )
+                return;
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+                event.preventDefault();
+                if (!event.repeat) changePlayer(event.key === "ArrowLeft" ? -1 : 1);
+            }
+        };
+        window.addEventListener("keydown", onKeyDown);
+        return () => window.removeEventListener("keydown", onKeyDown);
+    }, [changePlayer, multiplayer]);
+    return (
+        <div className="ui-modal">
+            <div className="ui-panel rs-border rs-background ui-result">
+                <h2 className={victory ? "ui-victory" : "ui-defeat"}>
+                    {victory && result
+                        ? getMap(result.mapId).victoryText
+                        : (result?.endedEarly ?? "Oh dear, you are dead!")}
+                </h2>
+                {result?.party && (
+                    <p className="ui-subtle">
+                        With {listNames(result.party, MAX_LISTED_TEAMMATES)}
+                    </p>
+                )}
+                {result?.endlessRecord && (
+                    <p className="ui-unlocked">
+                        Your furthest {result.hard && "hard "}endless run in{" "}
+                        {getMap(result.mapId).name}!
+                    </p>
+                )}
+                {result?.raidChest && <RaidChestView chest={result.raidChest} />}
+                {result?.firstHardWin && (
+                    <p className="ui-unlocked">
+                        You've beaten {getMap(result.mapId).name} on hard!
+                    </p>
+                )}
+                {result?.unlockedMap && (
+                    <p className="ui-unlocked">{result.unlockedMap} is open to you now!</p>
+                )}
+                {result?.unlockedCharacters.map((name) => (
+                    <p key={name} className="ui-unlocked">
+                        The {name} joins you!
+                    </p>
+                ))}
+                {result?.unlockedItems.map((name) => (
+                    <p key={name} className="ui-unlocked">
+                        {name} can be found now!
+                    </p>
+                ))}
+                {result && result.newTrophies.length > 0 && (
+                    <p className="ui-unlocked">
+                        New in the Collection log: {listNames(result.newTrophies)}
+                    </p>
+                )}
+                {result && result.newGear.length > 0 && (
+                    <p className="ui-unlocked">New in the Armoury: {listNames(result.newGear)}</p>
+                )}
+                {result?.quests.map((quest) => (
+                    <p key={quest.name} className="ui-unlocked">
+                        Quest complete: {quest.name}! <Coins amount={quest.coins} />
+                    </p>
+                ))}
+                {multiplayer && player && (
+                    <div
+                        className="ui-result-player-nav"
+                        role="group"
+                        aria-label="Player stats navigation"
+                    >
+                        <button
+                            className="ui-button ui-result-arrow"
+                            aria-label="Previous player's stats"
+                            title="Previous player (Left arrow)"
+                            onClick={() => changePlayer(-1)}
+                        >
+                            <span className="ui-result-arrow-left" aria-hidden="true" />
+                        </button>
+                        <div className="ui-result-player" aria-live="polite" aria-atomic="true">
+                            <div className="ui-result-player-name">
+                                {player.name}
+                                {player.isLocal && " (you)"}
+                            </div>
+                            <div className="ui-result-player-detail">
+                                Player {playerIndex + 1} of {players.length}
+                                {player.left ? " · Left the run" : player.down ? " · Down" : ""}
+                            </div>
+                        </div>
+                        <button
+                            className="ui-button ui-result-arrow"
+                            aria-label="Next player's stats"
+                            title="Next player (Right arrow)"
+                            onClick={() => changePlayer(1)}
+                        >
+                            <span className="ui-result-arrow-right" aria-hidden="true" />
+                        </button>
+                    </div>
+                )}
+                {result && player && (
+                    <div className="ui-result-columns">
+                        <div className="ui-result-column">
+                            {multiplayer && <h3 className="ui-pause-heading">Individual stats</h3>}
+                            <table className="ui-result-table" aria-label="Individual stats">
+                                <tbody>
+                                    <tr>
+                                        <td>Adventurer</td>
+                                        <td>{player.characterName}</td>
+                                    </tr>
+                                    <tr>
+                                        <td>Kills</td>
+                                        <td>
+                                            <Big value={player.kills} />
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td>Damage dealt</td>
+                                        <td>
+                                            <Big value={player.damageDealt} />
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td>Biggest hit</td>
+                                        <td>
+                                            <Big value={player.highestHit} />
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td>Damage taken</td>
+                                        <td>
+                                            <Big value={player.damageTaken} />
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td>Hitpoints healed</td>
+                                        <td>
+                                            <Big value={player.healed} />
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td>Caskets opened</td>
+                                        <td>{player.caskets}</td>
+                                    </tr>
+                                    {(player.rerollsUsed > 0 || player.skips > 0) && (
+                                        <tr>
+                                            <td>Rerolls / skips</td>
+                                            <td>
+                                                {player.rerollsUsed} / {player.skips}
+                                            </td>
+                                        </tr>
+                                    )}
+                                </tbody>
+                            </table>
+                            <h3 className="ui-pause-heading">
+                                {multiplayer ? "Party totals (shared)" : "Run totals"}
+                            </h3>
+                            <table
+                                className="ui-result-table"
+                                aria-label={multiplayer ? "Party totals" : "Run totals"}
+                            >
+                                <tbody>
+                                    {result.hard && (
+                                        <tr>
+                                            <td>Difficulty</td>
+                                            <td>{result.expert ? "Expert" : "Hard"}</td>
+                                        </tr>
+                                    )}
+                                    {result.endless && (
+                                        <tr>
+                                            <td>Endless round</td>
+                                            <td>{result.round}</td>
+                                        </tr>
+                                    )}
+                                    <tr>
+                                        <td>Run time</td>
+                                        <td>{formatTime(result.seconds)}</td>
+                                    </tr>
+                                    <tr>
+                                        <td>Level</td>
+                                        <td>{result.level}</td>
+                                    </tr>
+                                    {multiplayer && (
+                                        <>
+                                            <tr>
+                                                <td>Kills</td>
+                                                <td>
+                                                    <Big value={result.kills} />
+                                                </td>
+                                            </tr>
+                                            <tr>
+                                                <td>Damage dealt</td>
+                                                <td>
+                                                    <Big
+                                                        value={players.reduce(
+                                                            (total, entry) =>
+                                                                total + entry.damageDealt,
+                                                            0,
+                                                        )}
+                                                    />
+                                                </td>
+                                            </tr>
+                                            <tr>
+                                                <td>Caskets opened</td>
+                                                <td>{result.caskets}</td>
+                                            </tr>
+                                        </>
+                                    )}
+                                    <tr>
+                                        <td>Coins banked</td>
+                                        <td>
+                                            <Coins amount={result.coins} />
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                            {result.bossKills.length > 0 && (
+                                <>
+                                    <h3 className="ui-pause-heading">
+                                        {multiplayer ? "Party bosses" : "Bosses"}
+                                    </h3>
+                                    <table className="ui-result-table">
+                                        <tbody>
+                                            {result.bossKills.map((boss, i) => (
+                                                <tr key={i}>
+                                                    <td>{boss.name}</td>
+                                                    <td>{formatTime(boss.seconds)}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </>
+                            )}
+                        </div>
+                        {player.damage.length > 0 && (
+                            <div className="ui-result-column">
+                                <h3 className="ui-pause-heading">Damage breakdown</h3>
+                                <table className="ui-result-damage" aria-label="Damage breakdown">
+                                    <thead>
+                                        <tr>
+                                            <th />
+                                            <th>Damage</th>
+                                            <th>Kills</th>
+                                            <th>DPS</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {player.damage.map((row, i) => (
+                                            <tr key={i}>
+                                                <td>
+                                                    <span className="ui-result-source">
+                                                        {row.iconObjId !== undefined && (
+                                                            <ItemIcon
+                                                                objId={row.iconObjId}
+                                                                spriteId={row.iconSpriteId}
+                                                                size={24}
+                                                            />
+                                                        )}
+                                                        <span
+                                                            className="ui-result-name"
+                                                            style={{ color: row.color }}
+                                                            title={row.name}
+                                                        >
+                                                            {row.name}
+                                                        </span>
+                                                    </span>
+                                                </td>
+                                                <td>
+                                                    <Big value={row.damage} />
+                                                </td>
+                                                <td>
+                                                    <Big value={row.kills} />
+                                                </td>
+                                                <td>
+                                                    {row.perSecond !== undefined
+                                                        ? formatPerSecond(row.perSecond)
+                                                        : ""}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+                )}
+                <div className="ui-row">
+                    {/* A boss fight on your own: straight into it again */}
+                    {!ui.coop.room && getMap(ui.mapId).fight && (
+                        <button className="ui-button ui-button-go" onClick={() => client.retry()}>
+                            Retry
+                        </button>
+                    )}
+                    <button
+                        className={
+                            !ui.coop.room && getMap(ui.mapId).fight
+                                ? "ui-button"
+                                : "ui-button ui-button-go"
+                        }
+                        onClick={() => client.leaveRun()}
+                    >
+                        {ui.coop.room ? "Back to the party" : "Back to the title"}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}

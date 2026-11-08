@@ -1,0 +1,598 @@
+import {
+    COLLISION_LOC_STRIDE,
+    REGION_TILE_BRIDGE,
+    REGION_TILE_INSIDE,
+    type RegionData,
+} from "../../../mapviewer/worker/RegionData";
+import { CollisionFlag } from "../../../rs/pathfinder/flag/CollisionFlag";
+import { Steps, canStep } from "./FlowField";
+
+// Tiles nothing can stand on: objects (trees, rocks, furniture), blocked floor
+// (water, the edge of the world) and blocking floor decorations.
+export const SOLID_FLAGS =
+    CollisionFlag.OBJECT | CollisionFlag.FLOOR | CollisionFlag.FLOOR_DECORATION;
+
+// A floor's pillar (dropTile): an object, which shots would stop at too
+const PILLAR_FLAGS = CollisionFlag.OBJECT | CollisionFlag.OBJECT_PROJECTILE_BLOCKER;
+
+// Everything outside the arena counts as solid.
+const OUTSIDE_FLAGS = CollisionFlag.OBJECT;
+
+// Walls along a tile's edges and the posts at its corners
+const WALL_FLAGS =
+    CollisionFlag.WALL_NORTH |
+    CollisionFlag.WALL_EAST |
+    CollisionFlag.WALL_SOUTH |
+    CollisionFlag.WALL_WEST |
+    CollisionFlag.WALL_NORTH_WEST |
+    CollisionFlag.WALL_NORTH_EAST |
+    CollisionFlag.WALL_SOUTH_EAST |
+    CollisionFlag.WALL_SOUTH_WEST;
+
+// Objects block this much less than their tile on the sides facing open
+// ground, where there's no going by the ground they stand on. It stays under
+// the smallest radius over √2 (enemies' 0.3), so nothing's centre gets into
+// such a tile.
+export const OBJECT_INSET = 0.2;
+
+const DIR_X = [0, 1, 0, -1, 1, 1, -1, -1];
+const DIR_Y = [1, 0, -1, 0, 1, -1, -1, 1];
+
+// Flags that keep a loc's tiles blocking all over
+const UNFITTED_FLAGS = WALL_FLAGS | CollisionFlag.FLOOR | CollisionFlag.FLOOR_DECORATION;
+
+const fit = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
+
+export type Box = { x0: number; y0: number; x1: number; y1: number };
+
+// The playable part of the world: collision and ground heights for one
+// rectangle on one plane, indexed by world tile. Coordinates are world tiles, x east and y
+// north; fractional positions are inside a tile (3222.5 is the middle of 3222).
+export class ArenaGrid {
+    readonly baseX: number;
+    readonly baseY: number;
+    readonly sizeX: number;
+    readonly sizeY: number;
+    readonly plane: number;
+    // Whether getHeight follows the two triangles a tile's drawn as, rather than easing
+    // across it. It only shows on steep ground: ScapeRune maps (scaperune/CLAUDE.md).
+    exactGround = false;
+    // The cache's collision flags, less the locs that draw nothing and can go
+    private readonly flags: Int32Array;
+    // What blocks on each solid tile: a box, x0, y0, x1, y1 in tiles from the
+    // tile's south-west corner
+    private readonly boxes: Float32Array;
+    // Which steps out of each tile are allowed, for finding the way
+    readonly steps: Steps;
+    // Floor that's fallen away during a run (dropTile), by tile, so it can be put back
+    private readonly dropped: Uint8Array;
+    private droppedCount = 0;
+    // A floor's ledges (addLedge): the tile, and the wall flags set on it
+    private ledges: number[] = [];
+    // Goes up whenever a tile drops or comes back, so what's worked out from the grid (a flow
+    // field) knows to work it out again
+    version = 0;
+
+    constructor(readonly data: RegionData) {
+        this.baseX = data.baseX;
+        this.baseY = data.baseY;
+        this.sizeX = data.sizeX;
+        this.sizeY = data.sizeY;
+        this.plane = data.plane;
+        this.flags = data.collisionFlags.slice();
+
+        const pieces = this.findOpenPieces();
+        const owners = this.findStandaloneLocs(pieces);
+        const { stacks, stands } = this.findStacks(pieces);
+        const locs = data.collisionLocs;
+        // Standalone locs that draw nothing don't block at all
+        for (let i = 0; i < owners.length; i++) {
+            const at = owners[i] * COLLISION_LOC_STRIDE;
+            if (owners[i] >= 0 && locs[at + 4] > locs[at + 6]) {
+                this.flags[i] &= ~(CollisionFlag.OBJECT | CollisionFlag.OBJECT_PROJECTILE_BLOCKER);
+            }
+        }
+        this.boxes = new Float32Array(this.sizeX * this.sizeY * 4);
+        for (let y = 0; y < this.sizeY; y++) {
+            for (let x = 0; x < this.sizeX; x++) {
+                const tileX = this.baseX + x;
+                const tileY = this.baseY + y;
+                if (!this.isSolid(tileX, tileY)) {
+                    continue;
+                }
+                const i = x + y * this.sizeX;
+                this.setInsetBox(tileX, tileY, i);
+                const owner = owners[i];
+                const boxes = this.boxes;
+                const b = i * 4;
+                if (owner >= 0) {
+                    // Where the loc's model stands, if that's less (a crate that
+                    // fills its tile blocks no more than it would without this)
+                    const at = owner * COLLISION_LOC_STRIDE;
+                    const [x0, y0, x1, y1] = boxes.subarray(b, b + 4);
+                    boxes[b] = fit(locs[at + 4] - tileX, x0, x1);
+                    boxes[b + 1] = fit(locs[at + 5] - tileY, y0, y1);
+                    boxes[b + 2] = fit(locs[at + 6] - tileX, x0, x1);
+                    boxes[b + 3] = fit(locs[at + 7] - tileY, y0, y1);
+                } else if (
+                    stacks[i] >= 0 &&
+                    (this.getFlags(tileX, tileY) & UNFITTED_FLAGS) === 0 &&
+                    !this.touchesOtherBlocker(tileX, tileY, stacks)
+                ) {
+                    // Where the stack's models stand, on the sides setInsetBox
+                    // opened, so it never pulls away from what's beside it
+                    const at = stacks[i] * 4;
+                    if (boxes[b] > 0) {
+                        boxes[b] = fit(stands[at] - tileX, boxes[b], boxes[b + 2]);
+                    }
+                    if (boxes[b + 1] > 0) {
+                        boxes[b + 1] = fit(stands[at + 1] - tileY, boxes[b + 1], boxes[b + 3]);
+                    }
+                    if (boxes[b + 2] < 1) {
+                        boxes[b + 2] = fit(stands[at + 2] - tileX, boxes[b], boxes[b + 2]);
+                    }
+                    if (boxes[b + 3] < 1) {
+                        boxes[b + 3] = fit(stands[at + 3] - tileY, boxes[b + 1], boxes[b + 3]);
+                    }
+                }
+            }
+        }
+        this.steps = new Steps(this, this.baseX, this.baseY, this.sizeX, this.sizeY);
+        this.dropped = new Uint8Array(this.sizeX * this.sizeY);
+    }
+
+    // An open tile's floor falls away (MapDef.floor): it's blocked floor, as water is, until it's
+    // put back. Grids are kept between runs, so a run with a floor puts them all back first. A
+    // floor's pillar (pillar) blocks the same way, as an object would.
+    dropTile(tileX: number, tileY: number, pillar = false): void {
+        const i = this.indexOf(tileX, tileY);
+        if (i < 0 || this.dropped[i] || this.isSolid(tileX, tileY)) {
+            return;
+        }
+        this.dropped[i] = pillar ? 2 : 1;
+        this.droppedCount++;
+        this.flags[i] |= pillar ? PILLAR_FLAGS : CollisionFlag.FLOOR;
+        this.boxes[i * 4] = this.boxes[i * 4 + 1] = 0;
+        this.boxes[i * 4 + 2] = this.boxes[i * 4 + 3] = 1;
+        this.changed(tileX, tileY);
+    }
+
+    restoreTile(tileX: number, tileY: number): void {
+        const i = this.indexOf(tileX, tileY);
+        if (i < 0 || !this.dropped[i]) {
+            return;
+        }
+        this.flags[i] &= ~(this.dropped[i] === 2 ? PILLAR_FLAGS : CollisionFlag.FLOOR);
+        this.dropped[i] = 0;
+        this.droppedCount--;
+        this.boxes.fill(0, i * 4, i * 4 + 4);
+        this.changed(tileX, tileY);
+    }
+
+    // A ledge along a tile's east or north edge (a floor's raised or sunken tiles): a wall both
+    // sides of it, as a fence would be, so nobody walks up or down it. Gone with restoreAllTiles.
+    addLedge(tileX: number, tileY: number, side: "east" | "north"): void {
+        const east = side === "east";
+        const i = this.indexOf(tileX, tileY);
+        const j = this.indexOf(tileX + (east ? 1 : 0), tileY + (east ? 0 : 1));
+        if (i < 0 || j < 0) {
+            return;
+        }
+        const a = east ? CollisionFlag.WALL_EAST : CollisionFlag.WALL_NORTH;
+        const b = east ? CollisionFlag.WALL_WEST : CollisionFlag.WALL_SOUTH;
+        for (const [k, flag] of [
+            [i, a],
+            [j, b],
+        ]) {
+            if ((this.flags[k] & flag) === 0) {
+                this.flags[k] |= flag;
+                this.ledges.push(k, flag);
+            }
+        }
+        this.changed(tileX, tileY);
+    }
+
+    restoreAllTiles(): void {
+        for (let k = 0; k < this.ledges.length; k += 2) {
+            const i = this.ledges[k];
+            this.flags[i] &= ~this.ledges[k + 1];
+            this.changed(this.baseX + (i % this.sizeX), this.baseY + Math.floor(i / this.sizeX));
+        }
+        this.ledges = [];
+        for (let i = 0; i < this.dropped.length && this.droppedCount > 0; i++) {
+            if (this.dropped[i]) {
+                this.restoreTile(
+                    this.baseX + (i % this.sizeX),
+                    this.baseY + Math.floor(i / this.sizeX),
+                );
+            }
+        }
+    }
+
+    isDropped(tileX: number, tileY: number): boolean {
+        const i = this.indexOf(tileX, tileY);
+        return i >= 0 && this.dropped[i] === 1;
+    }
+
+    // Whether a floor's pillar stands on a tile (dropTile)
+    isPillar(tileX: number, tileY: number): boolean {
+        const i = this.indexOf(tileX, tileY);
+        return i >= 0 && this.dropped[i] === 2;
+    }
+
+    private indexOf(tileX: number, tileY: number): number {
+        const x = tileX - this.baseX;
+        const y = tileY - this.baseY;
+        return this.contains(tileX, tileY) ? x + y * this.sizeX : -1;
+    }
+
+    private changed(tileX: number, tileY: number): void {
+        this.steps.refresh(tileX, tileY);
+        this.version++;
+    }
+
+    // Locs that share a tile (a rock on its base) are a stack, which blocks
+    // where all their models stand on the sides of its tiles facing open
+    // ground: when every one of them has a model to go by and draws it, and the
+    // open ground round them is one piece, as for a loc that stands on its own
+    // (findStandaloneLocs), so getting round them opens no way anywhere that
+    // couldn't be reached before (round the end of a fence, say).
+    // Returns the stack on each tile that's fitted so, by its first loc (an
+    // index into collisionLocs), or -1, and the ground each stack stands on:
+    // four numbers by that loc, x0, y0, x1, y1 as collisionLocs has them.
+    private findStacks(pieces: Int32Array): { stacks: Int32Array; stands: Float32Array } {
+        const locs = this.data.collisionLocs;
+        const count = locs.length / COLLISION_LOC_STRIDE;
+
+        // The stack each loc's in, by its first loc, and the stack on each tile
+        const stackOf = Int32Array.from({ length: count }, (_, i) => i);
+        const find = (loc: number): number => {
+            while (stackOf[loc] !== loc) {
+                stackOf[loc] = stackOf[stackOf[loc]];
+                loc = stackOf[loc];
+            }
+            return loc;
+        };
+        const stacks = new Int32Array(this.sizeX * this.sizeY).fill(-1);
+        for (let loc = 0; loc < count; loc++) {
+            this.forLocTiles(loc, (tileX, tileY) => {
+                const i = this.indexOf(tileX, tileY);
+                if (i < 0) {
+                    return;
+                }
+                if (stacks[i] >= 0) {
+                    const a = find(loc);
+                    const b = find(stacks[i]);
+                    stackOf[Math.max(a, b)] = Math.min(a, b);
+                }
+                stacks[i] = loc;
+            });
+        }
+
+        // How many locs each stack has, the ground they stand on together, and
+        // whether it's fitted to it
+        const size = new Int32Array(count);
+        const stands = new Float32Array(count * 4);
+        const fits = new Uint8Array(count);
+        for (let loc = 0; loc < count; loc++) {
+            const stack = (stackOf[loc] = find(loc));
+            const at = loc * COLLISION_LOC_STRIDE;
+            const s = stack * 4;
+            if (size[stack]++ === 0) {
+                stands.set(locs.subarray(at + 4, at + 8), s);
+                fits[stack] = 1;
+            } else {
+                stands[s] = Math.min(stands[s], locs[at + 4]);
+                stands[s + 1] = Math.min(stands[s + 1], locs[at + 5]);
+                stands[s + 2] = Math.max(stands[s + 2], locs[at + 6]);
+                stands[s + 3] = Math.max(stands[s + 3], locs[at + 7]);
+            }
+            // Not with no model to go by (NaN), nor one that draws nothing
+            if (!(locs[at + 4] < locs[at + 6] && locs[at + 5] < locs[at + 7])) {
+                fits[stack] = 0;
+            }
+        }
+        const piece = new Int32Array(count).fill(-1);
+        for (let loc = 0; loc < count; loc++) {
+            const stack = stackOf[loc];
+            if (size[stack] < 2 || !fits[stack]) {
+                continue;
+            }
+            this.forLocRing(loc, (i) => {
+                if (pieces[i] < 0) {
+                    return;
+                }
+                if (piece[stack] !== -1 && piece[stack] !== pieces[i]) {
+                    fits[stack] = 0;
+                }
+                piece[stack] = pieces[i];
+            });
+        }
+        for (let i = 0; i < stacks.length; i++) {
+            if (stacks[i] >= 0) {
+                const stack = stackOf[stacks[i]];
+                stacks[i] = size[stack] > 1 && fits[stack] ? stack : -1;
+            }
+        }
+        return { stacks, stands };
+    }
+
+    // Whether anything solid but a stack's own tiles is next to one of them (findStacks): a
+    // side shared with another blocker could come apart if both were fitted, each to its own
+    private touchesOtherBlocker(tileX: number, tileY: number, stacks: Int32Array): boolean {
+        const stack = stacks[this.indexOf(tileX, tileY)];
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                const i = this.indexOf(tileX + dx, tileY + dy);
+                if (this.isSolid(tileX + dx, tileY + dy) && (i < 0 || stacks[i] !== stack)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // The whole tile, but for objects a little less on each side that has open
+    // ground all along it. Water and blocked floor fill their tiles, and walls
+    // on an object's tile already follow its edges.
+    private setInsetBox(tileX: number, tileY: number, i: number): void {
+        const flags = this.getFlags(tileX, tileY);
+        const boxes = this.boxes;
+        boxes[i * 4] = boxes[i * 4 + 1] = 0;
+        boxes[i * 4 + 2] = boxes[i * 4 + 3] = 1;
+        if ((flags & CollisionFlag.FLOOR) !== 0 || (flags & WALL_FLAGS) !== 0) {
+            return;
+        }
+        // A side is open if nothing's solid beyond it or at either end, so
+        // objects touching at a corner still meet there
+        const free = (dx: number, dy: number) => !this.isSolid(tileX + dx, tileY + dy);
+        const nw = free(-1, 1);
+        const ne = free(1, 1);
+        const se = free(1, -1);
+        const sw = free(-1, -1);
+        if (free(-1, 0) && sw && nw) {
+            boxes[i * 4] = OBJECT_INSET;
+        }
+        if (free(0, -1) && se && sw) {
+            boxes[i * 4 + 1] = OBJECT_INSET;
+        }
+        if (free(1, 0) && ne && se) {
+            boxes[i * 4 + 2] = 1 - OBJECT_INSET;
+        }
+        if (free(0, 1) && nw && ne) {
+            boxes[i * 4 + 3] = 1 - OBJECT_INSET;
+        }
+    }
+
+    // Locs that stand on their own block only where their model stands (a
+    // signpost on its post) rather than on all their tiles: ones with nothing
+    // else blocking on their tiles, no other such loc next to them, and all the
+    // open ground round them one piece, so getting between them and whatever's
+    // beside them opens no way anywhere that couldn't be reached before. Locs
+    // that draw nothing (invisible walls) stand together with any others next
+    // to them, the open ground round them all one piece, and a drawn loc next
+    // to them keeps its tiles.
+    // pieces: findOpenPieces. Returns the standalone loc on each tile (an index
+    // into collisionLocs), or -1.
+    private findStandaloneLocs(pieces: Int32Array): Int32Array {
+        const locs = this.data.collisionLocs;
+        const count = locs.length / COLLISION_LOC_STRIDE;
+        const tileCount = this.sizeX * this.sizeY;
+
+        // Which loc blocks each tile; -2 if more than one
+        const owners = new Int32Array(tileCount).fill(-1);
+        const candidate = new Uint8Array(count);
+        for (let loc = 0; loc < count; loc++) {
+            const at = loc * COLLISION_LOC_STRIDE;
+            let ok = !Number.isNaN(locs[at + 4]);
+            this.forLocTiles(loc, (tileX, tileY) => {
+                if (!this.contains(tileX, tileY)) {
+                    ok = false;
+                    return;
+                }
+                const i = tileX - this.baseX + (tileY - this.baseY) * this.sizeX;
+                owners[i] = owners[i] === -1 ? loc : -2;
+                if ((this.getFlags(tileX, tileY) & UNFITTED_FLAGS) !== 0) {
+                    ok = false;
+                }
+            });
+            candidate[loc] = ok ? 1 : 0;
+        }
+
+        const drawsNothing = (loc: number) =>
+            locs[loc * COLLISION_LOC_STRIDE + 4] > locs[loc * COLLISION_LOC_STRIDE + 6];
+        const standalone = new Int32Array(tileCount).fill(-1);
+        // The first loc of the group each loc's in, once it's in one
+        const groupOf = new Int32Array(count).fill(-1);
+        for (let loc = 0; loc < count; loc++) {
+            if (!candidate[loc] || groupOf[loc] !== -1) {
+                continue;
+            }
+            const group = [loc];
+            groupOf[loc] = loc;
+            let ok = true;
+            let piece = -1;
+            for (let g = 0; g < group.length; g++) {
+                const member = group[g];
+                this.forLocTiles(member, (tileX, tileY) => {
+                    const i = tileX - this.baseX + (tileY - this.baseY) * this.sizeX;
+                    ok &&= owners[i] === member;
+                });
+                this.forLocRing(member, (i) => {
+                    const other = owners[i];
+                    if (other >= 0 && candidate[other]) {
+                        if (groupOf[other] === loc) {
+                            return;
+                        }
+                        if (!drawsNothing(member)) {
+                            ok = false;
+                        } else if (drawsNothing(other)) {
+                            group.push(other);
+                            groupOf[other] = loc;
+                        }
+                        // A loc that's drawn next to it keeps all its tiles
+                    } else if (pieces[i] >= 0) {
+                        ok &&= piece === -1 || piece === pieces[i];
+                        piece = pieces[i];
+                    }
+                });
+            }
+            if (ok) {
+                for (const member of group) {
+                    this.forLocTiles(member, (tileX, tileY) => {
+                        standalone[tileX - this.baseX + (tileY - this.baseY) * this.sizeX] = member;
+                    });
+                }
+            }
+        }
+        return standalone;
+    }
+
+    private forLocTiles(loc: number, f: (tileX: number, tileY: number) => void): void {
+        const locs = this.data.collisionLocs;
+        const at = loc * COLLISION_LOC_STRIDE;
+        for (let dy = 0; dy < locs[at + 3]; dy++) {
+            for (let dx = 0; dx < locs[at + 2]; dx++) {
+                f(locs[at] + dx, locs[at + 1] + dy);
+            }
+        }
+    }
+
+    // The tiles in the grid all round a loc's, by index
+    private forLocRing(loc: number, f: (i: number) => void): void {
+        const locs = this.data.collisionLocs;
+        const at = loc * COLLISION_LOC_STRIDE;
+        const x0 = locs[at] - 1;
+        const y0 = locs[at + 1] - 1;
+        const x1 = locs[at] + locs[at + 2];
+        const y1 = locs[at + 1] + locs[at + 3];
+        for (let tileY = y0; tileY <= y1; tileY++) {
+            for (let tileX = x0; tileX <= x1; tileX++) {
+                const inside = tileX > x0 && tileX < x1 && tileY > y0 && tileY < y1;
+                if (!inside && this.contains(tileX, tileY)) {
+                    f(tileX - this.baseX + (tileY - this.baseY) * this.sizeX);
+                }
+            }
+        }
+    }
+
+    // Numbers the pieces of open ground that can be walked between with the
+    // OSRS rules, per tile; -1 for solid tiles
+    private findOpenPieces(): Int32Array {
+        const pieces = new Int32Array(this.sizeX * this.sizeY).fill(-1);
+        const queue: number[] = [];
+        let next = 0;
+        for (let start = 0; start < pieces.length; start++) {
+            const startX = this.baseX + (start % this.sizeX);
+            const startY = this.baseY + Math.floor(start / this.sizeX);
+            if (pieces[start] !== -1 || this.isSolid(startX, startY)) {
+                continue;
+            }
+            const piece = next++;
+            pieces[start] = piece;
+            queue.push(start);
+            while (queue.length > 0) {
+                const i = queue.pop()!;
+                const tileX = this.baseX + (i % this.sizeX);
+                const tileY = this.baseY + Math.floor(i / this.sizeX);
+                for (let d = 0; d < 8; d++) {
+                    const toX = tileX + DIR_X[d];
+                    const toY = tileY + DIR_Y[d];
+                    if (
+                        !this.contains(toX, toY) ||
+                        !canStep(this, tileX, tileY, DIR_X[d], DIR_Y[d])
+                    ) {
+                        continue;
+                    }
+                    const j = toX - this.baseX + (toY - this.baseY) * this.sizeX;
+                    if (pieces[j] === -1) {
+                        pieces[j] = piece;
+                        queue.push(j);
+                    }
+                }
+            }
+        }
+        return pieces;
+    }
+
+    contains(tileX: number, tileY: number): boolean {
+        const x = tileX - this.baseX;
+        const y = tileY - this.baseY;
+        return x >= 0 && y >= 0 && x < this.sizeX && y < this.sizeY;
+    }
+
+    getFlags(tileX: number, tileY: number): number {
+        const x = tileX - this.baseX;
+        const y = tileY - this.baseY;
+        if (x < 0 || y < 0 || x >= this.sizeX || y >= this.sizeY) {
+            return OUTSIDE_FLAGS;
+        }
+        return this.flags[x + y * this.sizeX];
+    }
+
+    isSolid(tileX: number, tileY: number): boolean {
+        return (this.getFlags(tileX, tileY) & SOLID_FLAGS) !== 0;
+    }
+
+    // The box that blocks on a solid tile, in world tiles: a signpost's post,
+    // the middle of a bush or the whole of a stretch of water
+    getSolidBox(tileX: number, tileY: number, out: Box): Box {
+        const x = tileX - this.baseX;
+        const y = tileY - this.baseY;
+        if (x < 0 || y < 0 || x >= this.sizeX || y >= this.sizeY) {
+            out.x0 = tileX;
+            out.y0 = tileY;
+            out.x1 = tileX + 1;
+            out.y1 = tileY + 1;
+            return out;
+        }
+        const i = (x + y * this.sizeX) * 4;
+        out.x0 = tileX + this.boxes[i];
+        out.y0 = tileY + this.boxes[i + 1];
+        out.x1 = tileX + this.boxes[i + 2];
+        out.y1 = tileY + this.boxes[i + 3];
+        return out;
+    }
+
+    getTileFlags(tileX: number, tileY: number): number {
+        const x = tileX - this.baseX;
+        const y = tileY - this.baseY;
+        if (x < 0 || y < 0 || x >= this.sizeX || y >= this.sizeY) {
+            return 0;
+        }
+        return this.data.tileFlags[x + y * this.sizeX];
+    }
+
+    isInside(tileX: number, tileY: number): boolean {
+        return (this.getTileFlags(tileX, tileY) & REGION_TILE_INSIDE) !== 0;
+    }
+
+    // Ground height at a world position in scene units (128 per tile, negative
+    // is up). On bridges this is the bridge deck, not the river bed.
+    getHeight(x: number, y: number): number {
+        const lx = Math.min(Math.max(x - this.baseX, 0), this.sizeX - 0.001);
+        const ly = Math.min(Math.max(y - this.baseY, 0), this.sizeY - 0.001);
+        const tx = Math.floor(lx);
+        const ty = Math.floor(ly);
+        const fx = lx - tx;
+        const fy = ly - ty;
+
+        const bridge = (this.data.tileFlags[tx + ty * this.sizeX] & REGION_TILE_BRIDGE) !== 0;
+        const heights = bridge ? this.data.bridgeHeights : this.data.heights;
+        const stride = this.sizeX + 1;
+        const i = tx + ty * stride;
+        const h00 = heights[i];
+        const h10 = heights[i + 1];
+        const h01 = heights[i + stride];
+        const h11 = heights[i + stride + 1];
+        if (this.exactGround) {
+            // Tiles split from south-east to north-west (SceneTileModel)
+            return fx + fy <= 1
+                ? h00 + (h10 - h00) * fx + (h01 - h00) * fy
+                : h11 + (h01 - h11) * (1 - fx) + (h10 - h11) * (1 - fy);
+        }
+        const south = h00 + (h10 - h00) * fx;
+        const north = h01 + (h11 - h01) * fx;
+        return south + (north - south) * fy;
+    }
+}

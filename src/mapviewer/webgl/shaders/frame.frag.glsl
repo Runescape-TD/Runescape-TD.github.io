@@ -1,0 +1,1 @@
+export default "#version 300 es\r\n\r\nprecision highp float;\r\n\r\nuniform highp sampler2D u_frame;\r\n\r\nout vec4 fragColor;\r\n\r\nvoid main() {\r\n    ivec2 fragCoord = ivec2(gl_FragCoord.xy);\r\n    fragColor = texelFetch(u_frame, fragCoord, 0);\r\n}\r\n";
