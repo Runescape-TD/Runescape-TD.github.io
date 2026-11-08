@@ -1,0 +1,85 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Build for Production (main)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          npx vite build --base=/
+
+      - name: Build for Tester (dev)
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          npx vite build --base=/dev/
+
+      - name: Checkout or prepare gh-pages branch
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Clone the existing gh-pages branch or create it if not present
+          git clone --branch gh-pages https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git site-deploy || {
+            mkdir site-deploy
+            cd site-deploy
+            git init -b gh-pages
+            git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+            cd ..
+          }
+
+      - name: Sync Production (main branch)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          # Copy dist files to root of gh-pages, preserving existing dev folder if present
+          if [ -d "site-deploy/dev" ]; then
+            mv site-deploy/dev ./temp-dev
+          fi
+          rm -rf site-deploy/*
+          cp -r dist/* site-deploy/
+          if [ -d "./temp-dev" ]; then
+            mv ./temp-dev site-deploy/dev
+          fi
+
+      - name: Sync Tester (dev branch)
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          # Copy dist files to /dev folder of gh-pages
+          mkdir -p site-deploy/dev
+          rm -rf site-deploy/dev/*
+          cp -r dist/* site-deploy/dev/
+
+      - name: Commit and Push to gh-pages
+        run: |
+          cd site-deploy
+          touch .nojekyll
+          git add -A
+          git commit -m "Automated deploy from ${{ github.ref_name }} [skip ci]" || echo "No changes to commit"
+          git push -u origin gh-pages
