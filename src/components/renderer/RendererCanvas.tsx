@@ -25,5 +25,5 @@ export function RendererCanvas({ renderer }: RendererCanvasProps): JSX.Element {
         };
     }, [renderer]);
 
-    return <div ref={divRef} style={{ width: "100%", height: "100%" }} tabIndex={0} />;
+    return <div ref={divRef} style={{ width: "100%", height: "100%", position: "absolute", inset: 0 }} tabIndex={0} />;
 }

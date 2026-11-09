@@ -34,6 +34,9 @@ export abstract class Renderer {
 
     constructor() {
         this.canvas = document.createElement("canvas");
+        this.canvas.style.position = "absolute";
+        this.canvas.style.left = "0";
+        this.canvas.style.top = "0";
         this.canvas.style.width = "100%";
         this.canvas.style.height = "100%";
         this.canvas.tabIndex = 0;

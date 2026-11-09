@@ -124,6 +124,25 @@ export function GameApp(): JSX.Element {
         return () => abortController.abort();
     }, []);
 
+    // Force canvas and layout stabilization on initial landscape load and orientation change
+    useEffect(() => {
+        const triggerResize = () => {
+            window.dispatchEvent(new Event("resize"));
+        };
+        window.addEventListener("resize", triggerResize);
+        window.addEventListener("orientationchange", triggerResize);
+        const t1 = setTimeout(triggerResize, 100);
+        const t2 = setTimeout(triggerResize, 400);
+        const t3 = setTimeout(triggerResize, 1000);
+        return () => {
+            clearTimeout(t1);
+            clearTimeout(t2);
+            clearTimeout(t3);
+            window.removeEventListener("resize", triggerResize);
+            window.removeEventListener("orientationchange", triggerResize);
+        };
+    }, []);
+
     useEffect(() => {
         if (!loaded || !overlayRef.current) return;
 

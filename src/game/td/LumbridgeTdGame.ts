@@ -224,10 +224,10 @@ export class LumbridgeTdGame implements GameFrameHandler {
     ) {
         this.overlay = new Overlay(overlayCanvas);
 
-        // Zoomed out camera with steeper bird's-eye pitch to view full battlefield comfortably
-        this.cameraRig.pitch = -490;
+        // Zoomed camera with angled isometric perspective to view battlefield with 3D depth
+        this.cameraRig.pitch = -435;
         this.cameraRig.yaw = 0;
-        this.cameraRig.distance = 38;
+        this.cameraRig.distance = 34.5;
 
         renderer.setPlane(grid.plane);
         renderer.setSmoothTerrain(false);
@@ -509,9 +509,9 @@ export class LumbridgeTdGame implements GameFrameHandler {
         const dt = Math.min(deltaTimeMs / 1000, 0.1);
         this.clientTicks += Math.round(dt * 50);
 
-        // Zoomed-out high-angle view over Lumbridge
-        const targetX = 3238.0;
-        const targetZ = 3226.0;
+        // Zoomed angled view over Lumbridge
+        const targetX = 3237.5;
+        const targetZ = 3225.5;
         const targetY = this.ground(targetX, targetZ);
         this.cameraRig.apply(camera, targetX, targetY, targetZ);
 
@@ -779,7 +779,12 @@ export class LumbridgeTdGame implements GameFrameHandler {
         const ctx = this.overlay.ctx;
         const now = performance.now();
 
-        // 1. Draw Range Circle for Selected Placed Defender
+        // 1. Draw Placement Grid when placing defender (translucent green for placement, translucent red with "X" for path/water)
+        if (this.isPlacing) {
+            this.drawPlacementGrid();
+        }
+
+        // 2. Draw Range Circle for Selected Placed Defender
         if (this.selectedDefenderId !== undefined) {
             const selected = this.defenders.find((d) => d.id === this.selectedDefenderId);
             if (selected) {
@@ -787,11 +792,11 @@ export class LumbridgeTdGame implements GameFrameHandler {
             }
         }
 
-        // 2. Draw Range Circle around Ghost Defender during placement
+        // 3. Draw Range Circle around Ghost Defender during placement
         if (this.isPlacing) {
             const range = this.placingType === "archer" ? 7.0 : 6.5;
             const isValid = this.canPlaceDefenderAt(this.ghostTileX, this.ghostTileZ);
-            const color = isValid ? "rgba(68, 255, 102, 0.85)" : "rgba(255, 68, 68, 0.85)";
+            const color = isValid ? "rgba(68, 255, 102, 0.9)" : "rgba(255, 68, 68, 0.9)";
             this.drawPreciseRangeCircle(this.ghostTileX + 0.5, this.ghostTileZ + 0.5, range, color);
         }
 
@@ -846,6 +851,92 @@ export class LumbridgeTdGame implements GameFrameHandler {
                 const fraction = Math.max(0, goblin.hp / goblin.maxHp);
                 ctx.fillStyle = "#22bb22";
                 ctx.fillRect(left, top, barWidth * fraction, barHeight);
+            }
+        }
+    }
+
+    // Visual placement grid: translucent green for buildable grass, translucent red with "X" for path/water
+    private drawPlacementGrid(): void {
+        const ctx = this.overlay.ctx;
+        const minX = 3226;
+        const maxX = 3251;
+        const minZ = 3217;
+        const maxZ = 3233;
+
+        const heightCount = maxZ - minZ + 2;
+        const widthCount = maxX - minX + 2;
+        const vertexMap: Array<{ x: number; y: number; visible: boolean } | null> = new Array(widthCount * heightCount);
+
+        for (let x = minX; x <= maxX + 1; x++) {
+            for (let z = minZ; z <= maxZ + 1; z++) {
+                const wy = this.ground(x, z);
+                const p = this.overlay.project(x, wy, z, this.screenHelper);
+                const idx = (x - minX) * heightCount + (z - minZ);
+                if (p.visible) {
+                    vertexMap[idx] = { x: p.x, y: p.y, visible: true };
+                } else {
+                    vertexMap[idx] = null;
+                }
+            }
+        }
+
+        for (let x = minX; x <= maxX; x++) {
+            for (let z = minZ; z <= maxZ; z++) {
+                const idx00 = (x - minX) * heightCount + (z - minZ);
+                const idx10 = (x + 1 - minX) * heightCount + (z - minZ);
+                const idx11 = (x + 1 - minX) * heightCount + (z + 1 - minZ);
+                const idx01 = (x - minX) * heightCount + (z + 1 - minZ);
+
+                const p00 = vertexMap[idx00];
+                const p10 = vertexMap[idx10];
+                const p11 = vertexMap[idx11];
+                const p01 = vertexMap[idx01];
+
+                if (!p00 || !p10 || !p11 || !p01) continue;
+
+                const isOnPath = this.isTileOnPath(x, z);
+                const isWater = x >= 3242 && x <= 3248 && !isOnPath;
+                const isValid = this.canPlaceDefenderAt(x, z);
+
+                if (isOnPath || isWater) {
+                    // Translucent red for path and water
+                    ctx.fillStyle = "rgba(239, 68, 68, 0.22)";
+                    ctx.strokeStyle = "rgba(239, 68, 68, 0.5)";
+                    ctx.lineWidth = 1;
+
+                    ctx.beginPath();
+                    ctx.moveTo(p00.x, p00.y);
+                    ctx.lineTo(p10.x, p10.y);
+                    ctx.lineTo(p11.x, p11.y);
+                    ctx.lineTo(p01.x, p01.y);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.stroke();
+
+                    // Diagonals "X" across vertices
+                    ctx.beginPath();
+                    ctx.moveTo(p00.x, p00.y);
+                    ctx.lineTo(p11.x, p11.y);
+                    ctx.moveTo(p10.x, p10.y);
+                    ctx.lineTo(p01.x, p01.y);
+                    ctx.strokeStyle = "rgba(239, 68, 68, 0.6)";
+                    ctx.lineWidth = 1.2;
+                    ctx.stroke();
+                } else if (isValid) {
+                    // Translucent green for buildable terrain
+                    ctx.fillStyle = "rgba(34, 197, 94, 0.16)";
+                    ctx.strokeStyle = "rgba(34, 197, 94, 0.38)";
+                    ctx.lineWidth = 1;
+
+                    ctx.beginPath();
+                    ctx.moveTo(p00.x, p00.y);
+                    ctx.lineTo(p10.x, p10.y);
+                    ctx.lineTo(p11.x, p11.y);
+                    ctx.lineTo(p01.x, p01.y);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.stroke();
+                }
             }
         }
     }

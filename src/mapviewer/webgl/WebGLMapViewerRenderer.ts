@@ -909,6 +909,11 @@ export class WebGLMapViewerRenderer extends MapViewerRenderer<WebGLMapSquare> {
 
     override onResize(width: number, height: number): void {
         this.app.resize(width, height);
+        this.textureColorTarget?.delete();
+        this.textureFramebuffer?.delete();
+        this.interactColorTarget?.delete();
+        this.interactFramebuffer?.delete();
+        this.initFramebuffers();
     }
 
     override render(time: number, deltaTime: number, resized: boolean): void {
