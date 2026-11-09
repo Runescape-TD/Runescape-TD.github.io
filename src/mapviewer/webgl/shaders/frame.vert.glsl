@@ -1,1 +1,0 @@
-export default "#version 300 es\r\n\r\nlayout(location = 0) in vec4 a_pos;\r\n\r\nvoid main() {\r\n    gl_Position = a_pos;\r\n}\r\n";
