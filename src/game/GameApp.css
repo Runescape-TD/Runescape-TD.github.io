@@ -1,3 +1,18 @@
+.game-root {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+    background: #000000;
+    margin: 0;
+    padding: 0;
+}
+
 .game-loading-overlay {
     position: fixed;
     top: 0;

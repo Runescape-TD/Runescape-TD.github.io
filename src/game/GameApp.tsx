@@ -222,6 +222,8 @@ export function GameApp(): JSX.Element {
                     onSelectDefender={(type) => tdGame.startPlacing(type)}
                     onConfirmPlacement={() => tdGame.confirmPlacing()}
                     onCancelPlacement={() => tdGame.cancelPlacing()}
+                    onSellSelected={() => tdGame.sellSelectedDefender()}
+                    onDeselect={() => tdGame.deselectDefender()}
                 />
             )}
         </div>

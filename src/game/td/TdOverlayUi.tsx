@@ -8,6 +8,8 @@ export interface TdOverlayUiProps {
     onSelectDefender: (type: DefenderType) => void;
     onConfirmPlacement: () => void;
     onCancelPlacement: () => void;
+    onSellSelected: () => void;
+    onDeselect: () => void;
 }
 
 export function TdOverlayUi({
@@ -16,6 +18,8 @@ export function TdOverlayUi({
     onSelectDefender,
     onConfirmPlacement,
     onCancelPlacement,
+    onSellSelected,
+    onDeselect,
 }: TdOverlayUiProps): JSX.Element {
     const isWaveRunning = state.waveActive;
     const gatePercent = Math.max(0, Math.min(100, (state.gateHp / state.maxGateHp) * 100));
@@ -130,6 +134,40 @@ export function TdOverlayUi({
                             onCancelPlacement();
                         }}
                         title="Cancel placement"
+                    >
+                        ✕
+                    </button>
+                </div>
+            )}
+
+            {/* Selected Defender Sell Action */}
+            {state.selectedDefenderId !== undefined && state.selectedDefenderPos?.visible && (
+                <div
+                    id="td-selected-actions"
+                    className="td-selected-actions"
+                    style={{
+                        left: `${Math.round(state.selectedDefenderPos.x)}px`,
+                        top: `${Math.round(state.selectedDefenderPos.y + 20)}px`,
+                    }}
+                >
+                    <button
+                        className="td-sell-btn"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onSellSelected();
+                        }}
+                        title="Sell Defender"
+                    >
+                        <span className="td-sell-icon">💰</span>
+                        <span>Sell</span>
+                    </button>
+                    <button
+                        className="td-ghost-btn cancel td-deselect-btn"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onDeselect();
+                        }}
+                        title="Deselect"
                     >
                         ✕
                     </button>

@@ -19,16 +19,17 @@ export interface Waypoint {
     y: number;
 }
 
-// Full authentic path: starts on the east bank of River Lum, crosses the bridge,
+// Full authentic path: starts on the east bank of River Lum, crosses the bridge at Y=3225.5,
 // reaches the T-junction, turns south down the road, and enters through the castle gate
 export const LUMBRIDGE_PATH: Waypoint[] = [
-    { x: 3252.0, y: 3228.0 }, // East river bank (entering bridge)
-    { x: 3246.0, y: 3228.0 }, // Middle of stone bridge
-    { x: 3241.0, y: 3228.0 }, // Coming off bridge (west side)
-    { x: 3236.5, y: 3228.0 }, // T-junction on dirt road
-    { x: 3236.0, y: 3223.5 }, // Road heading south past castle tower
-    { x: 3234.0, y: 3221.5 }, // Turn towards castle entrance
-    { x: 3230.5, y: 3221.0 }, // Through castle gate archway
+    { x: 3253.0, y: 3226.5 }, // East river bank (road entering bridge)
+    { x: 3248.5, y: 3225.5 }, // Entering bridge on east side
+    { x: 3244.5, y: 3225.5 }, // Center of stone bridge over River Lum
+    { x: 3240.5, y: 3225.5 }, // Leaving bridge on west side
+    { x: 3236.5, y: 3225.5 }, // T-junction on dirt road in front of watchtower
+    { x: 3236.0, y: 3222.5 }, // Dirt road heading south past castle tower
+    { x: 3233.5, y: 3221.0 }, // Turn west towards castle entrance
+    { x: 3230.5, y: 3221.0 }, // Castle gate archway
     { x: 3225.5, y: 3220.5 }, // Inside castle courtyard
 ];
 
@@ -101,6 +102,7 @@ export interface TdGameState {
     ghostScreenPos: { x: number; y: number; visible: boolean };
     // Selected placed defender
     selectedDefenderId?: number;
+    selectedDefenderPos?: { x: number; y: number; visible: boolean };
 }
 
 export class LumbridgeTdGame implements GameFrameHandler {
@@ -202,6 +204,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
     ghostTileZ = 3225;
     ghostScreenPos = { x: 0, y: 0, visible: false };
     selectedDefenderId?: number;
+    selectedDefenderPos?: { x: number; y: number; visible: boolean };
 
     private nextGoblinId = 1;
     private nextDefenderId = 1;
@@ -224,10 +227,10 @@ export class LumbridgeTdGame implements GameFrameHandler {
     ) {
         this.overlay = new Overlay(overlayCanvas);
 
-        // Zoomed camera with angled isometric perspective to view battlefield with 3D depth
-        this.cameraRig.pitch = -435;
+        // Zoomed in camera with angled isometric perspective to view defenders clearly
+        this.cameraRig.pitch = -430;
         this.cameraRig.yaw = 0;
-        this.cameraRig.distance = 34.5;
+        this.cameraRig.distance = 22.0;
 
         renderer.setPlane(grid.plane);
         renderer.setSmoothTerrain(false);
@@ -266,6 +269,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
             isGhostValid: this.canPlaceDefenderAt(this.ghostTileX, this.ghostTileZ),
             ghostScreenPos: { ...this.ghostScreenPos },
             selectedDefenderId: this.selectedDefenderId,
+            selectedDefenderPos: this.selectedDefenderPos ? { ...this.selectedDefenderPos } : undefined,
         });
     }
 
@@ -398,12 +402,13 @@ export class LumbridgeTdGame implements GameFrameHandler {
                 this.notifyState();
             }
         } else {
-            // Check if user tapped an existing defender to select it and see range
+            // Check if user tapped an existing defender to select it and see range / sell
             if (tile) {
                 const clickedDefender = this.defenders.find(
                     (d) => Math.hypot(d.x - (tile.tileX + 0.5), d.z - (tile.tileZ + 0.5)) < 1.3,
                 );
                 this.selectedDefenderId = clickedDefender ? clickedDefender.id : undefined;
+                this.updateSelectedDefenderScreenPos();
                 this.notifyState();
             }
         }
@@ -461,6 +466,68 @@ export class LumbridgeTdGame implements GameFrameHandler {
         }
     }
 
+    updateSelectedDefenderScreenPos(camera?: Camera): void {
+        if (this.selectedDefenderId === undefined) {
+            this.selectedDefenderPos = undefined;
+            return;
+        }
+        const defender = this.defenders.find((d) => d.id === this.selectedDefenderId);
+        if (!defender) {
+            this.selectedDefenderPos = undefined;
+            return;
+        }
+        const cam = camera ?? this.mapViewer.camera;
+        if (!cam) return;
+
+        const wx = defender.x;
+        const wz = defender.z;
+        const wy = this.ground(wx, wz);
+
+        vec4.set(this.tempVec, wx, wy, wz, 1);
+        vec4.transformMat4(this.tempVec, this.tempVec, cam.viewProjMatrix);
+        const w = this.tempVec[3];
+
+        if (w <= 0) {
+            this.selectedDefenderPos = { x: 0, y: 0, visible: false };
+            return;
+        }
+
+        const rect = this.renderer.canvas.getBoundingClientRect();
+        const ndcX = this.tempVec[0] / w;
+        const ndcY = this.tempVec[1] / w;
+
+        this.selectedDefenderPos = {
+            x: rect.left + ((ndcX + 1) / 2) * rect.width,
+            y: rect.top + ((1 - ndcY) / 2) * rect.height,
+            visible: true,
+        };
+
+        const el = document.getElementById("td-selected-actions");
+        if (el) {
+            el.style.left = `${Math.round(this.selectedDefenderPos.x)}px`;
+            el.style.top = `${Math.round(this.selectedDefenderPos.y + 20)}px`;
+            el.style.display = this.selectedDefenderPos.visible ? "flex" : "none";
+        }
+    }
+
+    sellSelectedDefender(): void {
+        if (this.selectedDefenderId === undefined) return;
+        const idx = this.defenders.findIndex((d) => d.id === this.selectedDefenderId);
+        if (idx >= 0) {
+            this.defenders.splice(idx, 1);
+            this.audio.play(2707, { volume: 0.5 });
+            this.selectedDefenderId = undefined;
+            this.selectedDefenderPos = undefined;
+            this.notifyState();
+        }
+    }
+
+    deselectDefender(): void {
+        this.selectedDefenderId = undefined;
+        this.selectedDefenderPos = undefined;
+        this.notifyState();
+    }
+
     private raycastGround(clientX: number, clientY: number): { tileX: number; tileZ: number } | undefined {
         const width = this.renderer.canvas.clientWidth;
         const height = this.renderer.canvas.clientHeight;
@@ -509,9 +576,9 @@ export class LumbridgeTdGame implements GameFrameHandler {
         const dt = Math.min(deltaTimeMs / 1000, 0.1);
         this.clientTicks += Math.round(dt * 50);
 
-        // Zoomed angled view over Lumbridge
-        const targetX = 3237.5;
-        const targetZ = 3225.5;
+        // Closer angled view over Lumbridge
+        const targetX = 3237.0;
+        const targetZ = 3224.5;
         const targetY = this.ground(targetX, targetZ);
         this.cameraRig.apply(camera, targetX, targetY, targetZ);
 
@@ -673,6 +740,9 @@ export class LumbridgeTdGame implements GameFrameHandler {
         if (this.isPlacing) {
             this.updateGhostScreenPos(camera);
         }
+        if (this.selectedDefenderId !== undefined) {
+            this.updateSelectedDefenderScreenPos(camera);
+        }
     }
 
     submitActors(actors: ActorRenderer, _camera: Camera): void {
@@ -698,7 +768,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
 
                 const height = this.ground(goblin.x, goblin.y);
                 actors.draw(goblinModel, anim, frame, goblin.x, height, goblin.y, goblin.yaw, {
-                    scale: 1.5,
+                    scale: 1.65,
                 });
             }
         }
@@ -721,7 +791,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
                 const height = this.ground(defender.x, defender.z);
 
                 actors.draw(model, anim, frame, defender.x, height, defender.z, defender.yaw, {
-                    scale: 1.0,
+                    scale: 1.55,
                 });
             }
         }
@@ -742,7 +812,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
                 const frame = idleAnim.getFrame(this.clientTicks);
 
                 actors.draw(model, idleAnim, frame, ghostX, ghostH, ghostZ, 1024, {
-                    scale: 1.0,
+                    scale: 1.55,
                     tint,
                     alpha: 0.8,
                     flash: -0.4,
