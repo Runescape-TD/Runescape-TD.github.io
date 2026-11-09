@@ -20,10 +20,19 @@ export function TdOverlayUi({
     const isWaveRunning = state.waveActive;
     const gatePercent = Math.max(0, Math.min(100, (state.gateHp / state.maxGateHp) * 100));
 
-    // Floating confirm/cancel buttons under the ghost archer
-    const showGhostButtons = state.isPlacingArcher && state.ghostScreenPos.visible;
-    const ghostLeft = state.ghostScreenPos.x;
-    const ghostTop = state.ghostScreenPos.y + 45; // Just below the ghost's feet
+    // Convert canvas internal pixels to CSS pixels for DOM positioning
+    const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    const hasValidScreenPos = state.ghostScreenPos && state.ghostScreenPos.visible;
+    const ghostLeft = hasValidScreenPos
+        ? state.ghostScreenPos.x / dpr
+        : typeof window !== "undefined"
+          ? window.innerWidth / 2
+          : 200;
+    const ghostTop = hasValidScreenPos
+        ? state.ghostScreenPos.y / dpr + 20
+        : typeof window !== "undefined"
+          ? window.innerHeight / 2 + 30
+          : 200;
 
     return (
         <div className="td-ui-container" dir="ltr">
@@ -84,8 +93,8 @@ export function TdOverlayUi({
                 </button>
             </footer>
 
-            {/* Floating Action Buttons under Ghost Archer during placement */}
-            {showGhostButtons && (
+            {/* Floating Action Buttons directly under Ghost Archer during placement */}
+            {state.isPlacingArcher && (
                 <div
                     className="td-ghost-actions"
                     style={{

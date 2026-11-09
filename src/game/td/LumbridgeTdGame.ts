@@ -19,14 +19,19 @@ export interface Waypoint {
     y: number;
 }
 
-// Solid dirt road waypoints right outside Lumbridge castle towards the gate
-// Starting after the bridge on open ground to ensure goblins never clip under the bridge deck
+// Exact road centerline matching the gray dirt road in Lumbridge:
+// 1. Off the bridge at (3241, 3228)
+// 2. West along the road to the T-junction at (3236, 3228)
+// 3. South along the road past the castle wall to (3236, 3222)
+// 4. West through the castle gate archway into courtyard at (3228, 3221)
 export const LUMBRIDGE_PATH: Waypoint[] = [
-    { x: 3240.5, y: 3226.0 }, // Solid road starting off bridge
-    { x: 3238.0, y: 3224.5 }, // Road bending towards castle
-    { x: 3235.5, y: 3221.5 }, // Road leading to gate
-    { x: 3232.0, y: 3220.5 }, // Castle gate archway
-    { x: 3228.0, y: 3220.0 }, // Courtyard
+    { x: 3241.0, y: 3228.0 }, // Road coming off bridge
+    { x: 3238.0, y: 3228.0 }, // Heading west on dirt road
+    { x: 3236.0, y: 3227.0 }, // T-junction turn
+    { x: 3236.0, y: 3223.5 }, // Road heading south past castle tower
+    { x: 3234.0, y: 3221.5 }, // Turn towards castle entrance
+    { x: 3230.5, y: 3221.0 }, // Through castle gate
+    { x: 3226.5, y: 3220.5 }, // Inside castle courtyard
 ];
 
 export interface TdGoblin {
@@ -175,10 +180,9 @@ export class LumbridgeTdGame implements GameFrameHandler {
 
     // Ghost Placement State
     isPlacingArcher = false;
-    ghostTileX = 3236;
-    ghostTileZ = 3224;
+    ghostTileX = 3238;
+    ghostTileZ = 3225;
     ghostScreenPos = { x: 0, y: 0, visible: false };
-    isDraggingGhost = false;
 
     private nextGoblinId = 1;
     private nextArcherId = 1;
@@ -189,7 +193,6 @@ export class LumbridgeTdGame implements GameFrameHandler {
 
     private boundOnPointerMove: (e: PointerEvent) => void;
     private boundOnPointerDown: (e: PointerEvent) => void;
-    private boundOnPointerUp: (e: PointerEvent) => void;
 
     constructor(
         readonly mapViewer: MapViewer,
@@ -214,14 +217,17 @@ export class LumbridgeTdGame implements GameFrameHandler {
 
         this.boundOnPointerMove = (e: PointerEvent) => this.handlePointerMove(e);
         this.boundOnPointerDown = (e: PointerEvent) => this.handlePointerDown(e);
-        this.boundOnPointerUp = (e: PointerEvent) => this.handlePointerUp(e);
 
         const canvas = renderer.canvas;
         canvas.addEventListener("pointermove", this.boundOnPointerMove);
         canvas.addEventListener("pointerdown", this.boundOnPointerDown);
-        window.addEventListener("pointerup", this.boundOnPointerUp);
 
         this.notifyState();
+    }
+
+    // Ground height at tile (x, z) in scene units (OSRS coordinate system: positive = grid.getHeight / 128)
+    ground(x: number, z: number): number {
+        return this.grid.getHeight(x, z) / 128;
     }
 
     notifyState(): void {
@@ -252,16 +258,15 @@ export class LumbridgeTdGame implements GameFrameHandler {
 
     startPlacingArcher(): void {
         this.isPlacingArcher = true;
-        // Default ghost position in center view
-        this.ghostTileX = 3236;
-        this.ghostTileZ = 3224;
+        // Default ghost position right on grass near center
+        this.ghostTileX = 3238;
+        this.ghostTileZ = 3225;
         this.audio.play(2707, { volume: 0.25 });
         this.notifyState();
     }
 
     cancelPlacingArcher(): void {
         this.isPlacingArcher = false;
-        this.isDraggingGhost = false;
         this.notifyState();
     }
 
@@ -283,7 +288,6 @@ export class LumbridgeTdGame implements GameFrameHandler {
         });
 
         this.isPlacingArcher = false;
-        this.isDraggingGhost = false;
         this.audio.play(2707, { volume: 0.6 });
         this.notifyState();
         return true;
@@ -333,7 +337,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
         if (this.archers.some((a) => a.tileX === tileX && a.tileZ === tileZ)) {
             return false;
         }
-        if (tileX < 3225 || tileX > 3248 || tileZ < 3214 || tileZ > 3232) {
+        if (tileX < 3225 || tileX > 3248 || tileZ < 3214 || tileZ > 3234) {
             return false;
         }
         return true;
@@ -341,18 +345,13 @@ export class LumbridgeTdGame implements GameFrameHandler {
 
     private handlePointerDown(e: PointerEvent): void {
         if (!this.isPlacingArcher) return;
-        this.isDraggingGhost = true;
         this.updateGhostFromPointer(e);
     }
 
     private handlePointerMove(e: PointerEvent): void {
-        if (this.isPlacingArcher) {
+        if (this.isPlacingArcher && e.buttons > 0) {
             this.updateGhostFromPointer(e);
         }
-    }
-
-    private handlePointerUp(_e: PointerEvent): void {
-        this.isDraggingGhost = false;
     }
 
     private updateGhostFromPointer(e: PointerEvent): void {
@@ -399,10 +398,11 @@ export class LumbridgeTdGame implements GameFrameHandler {
         const dirY = farY - nearY;
         const dirZ = farZ - nearZ;
 
-        const groundEstimateY = -0.65;
+        // Ground elevation in Lumbridge
+        const groundY = this.ground(3236.5, 3223.5);
         if (Math.abs(dirY) < 1e-6) return undefined;
 
-        const t = (groundEstimateY - nearY) / dirY;
+        const t = (groundY - nearY) / dirY;
         if (t <= 0) return undefined;
 
         const hitX = nearX + dirX * t;
@@ -421,7 +421,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
         // Fixed camera over Lumbridge path
         const targetX = 3236.5;
         const targetZ = 3223.5;
-        const targetY = -this.grid.getHeight(targetX, targetZ) / 128;
+        const targetY = this.ground(targetX, targetZ);
         this.cameraRig.apply(camera, targetX, targetY, targetZ);
 
         // Wave Spawning
@@ -513,8 +513,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
                     archer.attackCooldown = 1.1;
                     archer.shootAnimTimer = 0.5;
 
-                    const archerGround = -this.grid.getHeight(archer.x, archer.z) / 128;
-                    const arrowY = archerGround - 1.2;
+                    const arrowY = this.ground(archer.x, archer.z) - 1.2;
 
                     this.arrows.push({
                         id: this.nextArrowId++,
@@ -543,8 +542,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
                 continue;
             }
 
-            const targetGround = -this.grid.getHeight(target.x, target.y) / 128;
-            const targetHeight = targetGround - 0.7;
+            const targetHeight = this.ground(target.x, target.y) - 0.7;
 
             const dx = target.x - arrow.x;
             const dy = targetHeight - arrow.y;
@@ -581,7 +579,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
 
         // Update ghost screen position for floating buttons
         if (this.isPlacingArcher) {
-            const gh = -this.grid.getHeight(this.ghostTileX + 0.5, this.ghostTileZ + 0.5) / 128;
+            const gh = this.ground(this.ghostTileX + 0.5, this.ghostTileZ + 0.5);
             this.overlay.project(this.ghostTileX + 0.5, gh, this.ghostTileZ + 0.5, this.screen);
             this.ghostScreenPos.x = this.screen.x;
             this.ghostScreenPos.y = this.screen.y;
@@ -610,7 +608,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
                     frame = anim.getFrame(goblin.ticksAlive);
                 }
 
-                const height = -this.grid.getHeight(goblin.x, goblin.y) / 128;
+                const height = this.ground(goblin.x, goblin.y);
                 actors.draw(goblinModel, anim, frame, goblin.x, height, goblin.y, goblin.yaw, {
                     scale: 1.5,
                 });
@@ -626,7 +624,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
             const shootAnim = archerModel.getAnim(426);
 
             for (const archer of this.archers) {
-                const height = -this.grid.getHeight(archer.x, archer.z) / 128;
+                const height = this.ground(archer.x, archer.z);
                 const isShooting = archer.shootAnimTimer > 0;
                 const anim = isShooting && shootAnim ? shootAnim : idleAnim;
                 const frame = anim.getFrame(this.clientTicks);
@@ -640,7 +638,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
             if (this.isPlacingArcher) {
                 const ghostX = this.ghostTileX + 0.5;
                 const ghostZ = this.ghostTileZ + 0.5;
-                const ghostH = -this.grid.getHeight(ghostX, ghostZ) / 128;
+                const ghostH = this.ground(ghostX, ghostZ);
                 const isValid = this.canPlaceArcherAt(this.ghostTileX, this.ghostTileZ);
                 const tint = isValid ? 0x44ff66 : 0xff3333;
                 const frame = idleAnim.getFrame(this.clientTicks);
@@ -684,7 +682,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
         if (this.isPlacingArcher) {
             const centerX = this.ghostTileX + 0.5;
             const centerZ = this.ghostTileZ + 0.5;
-            const h = -this.grid.getHeight(centerX, centerZ) / 128;
+            const h = this.ground(centerX, centerZ);
             const p = this.overlay.project(centerX, h, centerZ, { x: 0, y: 0, visible: false });
 
             if (p.visible) {
@@ -710,7 +708,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
         const damageSprite = this.assets.getSprite(HITSPLAT_SPRITES.damage);
         for (const hitsplat of this.hitsplats) {
             const progress = (now - hitsplat.createdTime) / 1200;
-            const h = -this.grid.getHeight(hitsplat.x, hitsplat.z) / 128 - 1.2 - progress * 0.4;
+            const h = this.ground(hitsplat.x, hitsplat.z) - 1.2 - progress * 0.4;
             const p = this.overlay.project(hitsplat.x, h, hitsplat.z, this.screen);
 
             if (p.visible) {
@@ -739,7 +737,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
         // 3. Draw Goblin Health Bars
         for (const goblin of this.goblins) {
             if (goblin.state !== "walking") continue;
-            const h = -this.grid.getHeight(goblin.x, goblin.y) / 128 - 1.2;
+            const h = this.ground(goblin.x, goblin.y) - 1.2;
             const p = this.overlay.project(goblin.x, h, goblin.y, this.screen);
 
             if (p.visible) {
@@ -765,7 +763,6 @@ export class LumbridgeTdGame implements GameFrameHandler {
         const canvas = this.renderer.canvas;
         canvas.removeEventListener("pointermove", this.boundOnPointerMove);
         canvas.removeEventListener("pointerdown", this.boundOnPointerDown);
-        window.removeEventListener("pointerup", this.boundOnPointerUp);
     }
 }
 
