@@ -1,11 +1,11 @@
 import React from "react";
-import { TdGameState } from "./LumbridgeTdGame";
+import { DefenderType, TdGameState } from "./LumbridgeTdGame";
 import "./TdOverlayUi.css";
 
 export interface TdOverlayUiProps {
     state: TdGameState;
     onStartWave: () => void;
-    onSelectArcher: () => void;
+    onSelectDefender: (type: DefenderType) => void;
     onConfirmPlacement: () => void;
     onCancelPlacement: () => void;
 }
@@ -13,26 +13,17 @@ export interface TdOverlayUiProps {
 export function TdOverlayUi({
     state,
     onStartWave,
-    onSelectArcher,
+    onSelectDefender,
     onConfirmPlacement,
     onCancelPlacement,
 }: TdOverlayUiProps): JSX.Element {
     const isWaveRunning = state.waveActive;
     const gatePercent = Math.max(0, Math.min(100, (state.gateHp / state.maxGateHp) * 100));
 
-    // Convert canvas internal pixels to CSS pixels for DOM positioning
-    const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
-    const hasValidScreenPos = state.ghostScreenPos && state.ghostScreenPos.visible;
-    const ghostLeft = hasValidScreenPos
-        ? state.ghostScreenPos.x / dpr
-        : typeof window !== "undefined"
-          ? window.innerWidth / 2
-          : 200;
-    const ghostTop = hasValidScreenPos
-        ? state.ghostScreenPos.y / dpr + 20
-        : typeof window !== "undefined"
-          ? window.innerHeight / 2 + 30
-          : 200;
+    // Floating confirm/cancel buttons position directly under ghost defender
+    const hasGhostPos = state.isPlacing && state.ghostScreenPos.visible;
+    const ghostLeft = hasGhostPos ? state.ghostScreenPos.x : 200;
+    const ghostTop = hasGhostPos ? state.ghostScreenPos.y + 25 : 200;
 
     return (
         <div className="td-ui-container" dir="ltr">
@@ -67,20 +58,35 @@ export function TdOverlayUi({
                 </div>
             </header>
 
-            {/* Bottom Bar: Compact corner buttons */}
+            {/* Bottom Bar: Compact corner buttons for Archer, Wizard and Wave */}
             <footer className="td-bottom-bar">
-                {/* Archer Recruit Pill (Bottom Left) */}
-                <button
-                    className={`td-btn-recruit ${state.isPlacingArcher ? "active" : ""}`}
-                    onClick={onSelectArcher}
-                    title="Click to place Archer on grass"
-                >
-                    <span className="td-recruit-icon">🏹</span>
-                    <div className="td-recruit-info">
-                        <span className="td-recruit-title">Archer</span>
-                        <span className="td-recruit-sub">1-Hit Kill | Free</span>
-                    </div>
-                </button>
+                <div className="td-defenders-dock">
+                    {/* Archer Recruit Card */}
+                    <button
+                        className={`td-btn-recruit ${state.isPlacing && state.placingType === "archer" ? "active" : ""}`}
+                        onClick={() => onSelectDefender("archer")}
+                        title="Deploy 3D Archer"
+                    >
+                        <span className="td-recruit-icon">🏹</span>
+                        <div className="td-recruit-info">
+                            <span className="td-recruit-title">Archer</span>
+                            <span className="td-recruit-sub">Physical | Free</span>
+                        </div>
+                    </button>
+
+                    {/* Wizard Recruit Card */}
+                    <button
+                        className={`td-btn-recruit ${state.isPlacing && state.placingType === "wizard" ? "active" : ""}`}
+                        onClick={() => onSelectDefender("wizard")}
+                        title="Deploy 3D Wizard"
+                    >
+                        <span className="td-recruit-icon">🧙</span>
+                        <div className="td-recruit-info">
+                            <span className="td-recruit-title">Wizard</span>
+                            <span className="td-recruit-sub">Magic Strike | Free</span>
+                        </div>
+                    </button>
+                </div>
 
                 {/* Start Wave Pill (Bottom Right) */}
                 <button
@@ -93,13 +99,14 @@ export function TdOverlayUi({
                 </button>
             </footer>
 
-            {/* Floating Action Buttons directly under Ghost Archer during placement */}
-            {state.isPlacingArcher && (
+            {/* Floating Action Buttons directly under Ghost during placement */}
+            {state.isPlacing && hasGhostPos && (
                 <div
+                    id="td-ghost-actions"
                     className="td-ghost-actions"
                     style={{
-                        left: `${ghostLeft}px`,
-                        top: `${ghostTop}px`,
+                        left: `${Math.round(ghostLeft)}px`,
+                        top: `${Math.round(ghostTop)}px`,
                     }}
                 >
                     {/* Confirm Button */}
@@ -110,7 +117,7 @@ export function TdOverlayUi({
                             if (state.isGhostValid) onConfirmPlacement();
                         }}
                         disabled={!state.isGhostValid}
-                        title={state.isGhostValid ? "Confirm placement" : "Cannot place here"}
+                        title={state.isGhostValid ? "Confirm placement" : "Cannot place on path or water"}
                     >
                         ✓
                     </button>

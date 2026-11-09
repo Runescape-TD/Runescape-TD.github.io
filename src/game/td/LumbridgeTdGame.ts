@@ -19,20 +19,20 @@ export interface Waypoint {
     y: number;
 }
 
-// Exact road centerline matching the gray dirt road in Lumbridge:
-// 1. Off the bridge at (3241, 3228)
-// 2. West along the road to the T-junction at (3236, 3228)
-// 3. South along the road past the castle wall to (3236, 3222)
-// 4. West through the castle gate archway into courtyard at (3228, 3221)
+// Full authentic path: starts on the east bank of River Lum, crosses the bridge,
+// reaches the T-junction, turns south down the road, and enters through the castle gate
 export const LUMBRIDGE_PATH: Waypoint[] = [
-    { x: 3241.0, y: 3228.0 }, // Road coming off bridge
-    { x: 3238.0, y: 3228.0 }, // Heading west on dirt road
-    { x: 3236.0, y: 3227.0 }, // T-junction turn
+    { x: 3252.0, y: 3228.0 }, // East river bank (entering bridge)
+    { x: 3246.0, y: 3228.0 }, // Middle of stone bridge
+    { x: 3241.0, y: 3228.0 }, // Coming off bridge (west side)
+    { x: 3236.5, y: 3228.0 }, // T-junction on dirt road
     { x: 3236.0, y: 3223.5 }, // Road heading south past castle tower
     { x: 3234.0, y: 3221.5 }, // Turn towards castle entrance
-    { x: 3230.5, y: 3221.0 }, // Through castle gate
-    { x: 3226.5, y: 3220.5 }, // Inside castle courtyard
+    { x: 3230.5, y: 3221.0 }, // Through castle gate archway
+    { x: 3225.5, y: 3220.5 }, // Inside castle courtyard
 ];
+
+export type DefenderType = "archer" | "wizard";
 
 export interface TdGoblin {
     id: number;
@@ -48,8 +48,9 @@ export interface TdGoblin {
     ticksAlive: number;
 }
 
-export interface TdArcher {
+export interface TdDefender {
     id: number;
+    type: DefenderType;
     tileX: number;
     tileZ: number;
     x: number;
@@ -61,8 +62,9 @@ export interface TdArcher {
     targetGoblinId?: number;
 }
 
-export interface TdArrow {
+export interface TdProjectile {
     id: number;
+    kind: "arrow" | "fireball";
     startX: number;
     startY: number;
     startZ: number;
@@ -89,13 +91,16 @@ export interface TdGameState {
     gateHp: number;
     maxGateHp: number;
     gold: number;
-    archersCount: number;
-    // Ghost placement state
-    isPlacingArcher: boolean;
+    defendersCount: number;
+    // Placement state
+    isPlacing: boolean;
+    placingType: DefenderType;
     ghostTileX: number;
     ghostTileZ: number;
     isGhostValid: boolean;
     ghostScreenPos: { x: number; y: number; visible: boolean };
+    // Selected placed defender
+    selectedDefenderId?: number;
 }
 
 export class LumbridgeTdGame implements GameFrameHandler {
@@ -112,7 +117,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
             arena.baseY,
             arena.baseX + arena.sizeX,
             arena.baseY + arena.sizeY,
-            { behind: 44, around: 30 },
+            { behind: 50, around: 40 },
         );
 
         const workerPool = mapViewer.workerPool;
@@ -122,7 +127,8 @@ export class LumbridgeTdGame implements GameFrameHandler {
         );
 
         const audio = new GameAudio();
-        const soundsPromise = audio.load(workerPool, [469, 471, 472, 2707, 711, 713]);
+        // 469 (goblin attack), 471 (goblin death), 472 (goblin hit), 2707 (bow shot), 160 (fire strike cast), 161 (impact)
+        const soundsPromise = audio.load(workerPool, [469, 471, 472, 2707, 160, 161, 711, 713]);
 
         const actors = await renderer.getActorRenderer();
         const assets = new GameAssets(workerPool, renderer, actors);
@@ -134,7 +140,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
         const goblinDef = getEnemy("goblin");
         await assets.loadEnemies([goblinDef]);
 
-        // Bake Archer with Shortbow and ranger leather armor
+        // Slot 0: Archer (Shortbow + Leather gear)
         const archerAppearance = createAppearance({
             [EquipSlot.HEAD]: 1169, // Coif
             [EquipSlot.TORSO]: 1129, // Leather body
@@ -143,6 +149,16 @@ export class LumbridgeTdGame implements GameFrameHandler {
             [EquipSlot.WEAPON]: 841, // Shortbow
         });
         await assets.setPlayerAppearance(archerAppearance, 0, [426]);
+
+        // Slot 1: Wizard (Wizard hat + Blue/black robe + Staff of fire)
+        const wizardAppearance = createAppearance({
+            [EquipSlot.HEAD]: 1017, // Wizard hat
+            [EquipSlot.TORSO]: 577, // Wizard robe top
+            [EquipSlot.LEGS]: 1011, // Robe bottoms
+            [EquipSlot.CAPE]: 1021, // Cape
+            [EquipSlot.WEAPON]: 1387, // Staff of fire
+        });
+        await assets.setPlayerAppearance(wizardAppearance, 1, [711]);
 
         const grid = new ArenaGrid(await regionPromise);
         await soundsPromise;
@@ -161,12 +177,13 @@ export class LumbridgeTdGame implements GameFrameHandler {
 
     readonly cameraRig = new CameraRig();
     readonly overlay: Overlay;
-    private readonly screen: ScreenPoint = { x: 0, y: 0, visible: false };
+    private readonly screenHelper: ScreenPoint = { x: 0, y: 0, visible: false };
+    private readonly tempVec = vec4.create();
 
     // Game Entities
     goblins: TdGoblin[] = [];
-    archers: TdArcher[] = [];
-    arrows: TdArrow[] = [];
+    defenders: TdDefender[] = [];
+    projectiles: TdProjectile[] = [];
     hitsplats: TdHitsplat[] = [];
 
     // Wave Management
@@ -178,15 +195,17 @@ export class LumbridgeTdGame implements GameFrameHandler {
     maxGateHp = 100;
     gold = Infinity;
 
-    // Ghost Placement State
-    isPlacingArcher = false;
-    ghostTileX = 3238;
+    // Placement State
+    isPlacing = false;
+    placingType: DefenderType = "archer";
+    ghostTileX = 3237;
     ghostTileZ = 3225;
     ghostScreenPos = { x: 0, y: 0, visible: false };
+    selectedDefenderId?: number;
 
     private nextGoblinId = 1;
-    private nextArcherId = 1;
-    private nextArrowId = 1;
+    private nextDefenderId = 1;
+    private nextProjectileId = 1;
     private nextHitsplatId = 1;
     private clientTicks = 0;
     private lastInvViewProj = mat4.create();
@@ -205,10 +224,10 @@ export class LumbridgeTdGame implements GameFrameHandler {
     ) {
         this.overlay = new Overlay(overlayCanvas);
 
-        // Position camera to look directly at the Lumbridge road
-        this.cameraRig.pitch = -380;
+        // Zoomed out camera with steeper bird's-eye pitch to view full battlefield comfortably
+        this.cameraRig.pitch = -490;
         this.cameraRig.yaw = 0;
-        this.cameraRig.distance = 21;
+        this.cameraRig.distance = 38;
 
         renderer.setPlane(grid.plane);
         renderer.setSmoothTerrain(false);
@@ -222,10 +241,10 @@ export class LumbridgeTdGame implements GameFrameHandler {
         canvas.addEventListener("pointermove", this.boundOnPointerMove);
         canvas.addEventListener("pointerdown", this.boundOnPointerDown);
 
+        this.updateGhostScreenPos();
         this.notifyState();
     }
 
-    // Ground height at tile (x, z) in scene units (OSRS coordinate system: positive = grid.getHeight / 128)
     ground(x: number, z: number): number {
         return this.grid.getHeight(x, z) / 128;
     }
@@ -239,56 +258,74 @@ export class LumbridgeTdGame implements GameFrameHandler {
             gateHp: this.gateHp,
             maxGateHp: this.maxGateHp,
             gold: this.gold,
-            archersCount: this.archers.length,
-            isPlacingArcher: this.isPlacingArcher,
+            defendersCount: this.defenders.length,
+            isPlacing: this.isPlacing,
+            placingType: this.placingType,
             ghostTileX: this.ghostTileX,
             ghostTileZ: this.ghostTileZ,
-            isGhostValid: this.canPlaceArcherAt(this.ghostTileX, this.ghostTileZ),
+            isGhostValid: this.canPlaceDefenderAt(this.ghostTileX, this.ghostTileZ),
             ghostScreenPos: { ...this.ghostScreenPos },
+            selectedDefenderId: this.selectedDefenderId,
         });
     }
 
     startWave(): void {
         if (this.waveActive) return;
         this.waveActive = true;
-        this.goblinsToSpawn = 8;
+        this.goblinsToSpawn = 10;
         this.spawnTimer = 0;
         this.notifyState();
     }
 
-    startPlacingArcher(): void {
-        this.isPlacingArcher = true;
-        // Default ghost position right on grass near center
-        this.ghostTileX = 3238;
-        this.ghostTileZ = 3225;
-        this.audio.play(2707, { volume: 0.25 });
+    startPlacing(type: DefenderType): void {
+        this.isPlacing = true;
+        this.placingType = type;
+        this.selectedDefenderId = undefined;
+
+        // Position in the center of the camera view
+        const centerTile = this.raycastGround(
+            this.renderer.canvas.clientWidth / 2,
+            this.renderer.canvas.clientHeight / 2,
+        );
+        if (centerTile && centerTile.tileX >= 3224 && centerTile.tileX <= 3252) {
+            this.ghostTileX = centerTile.tileX;
+            this.ghostTileZ = centerTile.tileZ;
+        } else {
+            this.ghostTileX = 3237;
+            this.ghostTileZ = 3225;
+        }
+
+        this.audio.play(type === "archer" ? 2707 : 160, { volume: 0.25 });
+        this.updateGhostScreenPos();
         this.notifyState();
     }
 
-    cancelPlacingArcher(): void {
-        this.isPlacingArcher = false;
+    cancelPlacing(): void {
+        this.isPlacing = false;
         this.notifyState();
     }
 
-    confirmPlacingArcher(): boolean {
-        if (!this.canPlaceArcherAt(this.ghostTileX, this.ghostTileZ)) {
+    confirmPlacing(): boolean {
+        if (!this.canPlaceDefenderAt(this.ghostTileX, this.ghostTileZ)) {
             return false;
         }
 
-        this.archers.push({
-            id: this.nextArcherId++,
+        const isArcher = this.placingType === "archer";
+        this.defenders.push({
+            id: this.nextDefenderId++,
+            type: this.placingType,
             tileX: this.ghostTileX,
             tileZ: this.ghostTileZ,
             x: this.ghostTileX + 0.5,
             z: this.ghostTileZ + 0.5,
             yaw: 1024,
-            range: 7.0,
+            range: isArcher ? 7.0 : 6.5,
             attackCooldown: 0.3,
             shootAnimTimer: 0,
         });
 
-        this.isPlacingArcher = false;
-        this.audio.play(2707, { volume: 0.6 });
+        this.isPlacing = false;
+        this.audio.play(isArcher ? 2707 : 160, { volume: 0.6 });
         this.notifyState();
         return true;
     }
@@ -330,42 +367,97 @@ export class LumbridgeTdGame implements GameFrameHandler {
         return false;
     }
 
-    canPlaceArcherAt(tileX: number, tileZ: number): boolean {
+    canPlaceDefenderAt(tileX: number, tileZ: number): boolean {
         if (this.isTileOnPath(tileX, tileZ)) {
             return false;
         }
-        if (this.archers.some((a) => a.tileX === tileX && a.tileZ === tileZ)) {
+        // Prevent placing inside River Lum water (except path across bridge)
+        if (tileX >= 3242 && tileX <= 3248) {
             return false;
         }
-        if (tileX < 3225 || tileX > 3248 || tileZ < 3214 || tileZ > 3234) {
+        if (this.defenders.some((d) => d.tileX === tileX && d.tileZ === tileZ)) {
+            return false;
+        }
+        if (tileX < 3224 || tileX > 3252 || tileZ < 3214 || tileZ > 3236) {
             return false;
         }
         return true;
     }
 
     private handlePointerDown(e: PointerEvent): void {
-        if (!this.isPlacingArcher) return;
-        this.updateGhostFromPointer(e);
-    }
-
-    private handlePointerMove(e: PointerEvent): void {
-        if (this.isPlacingArcher && e.buttons > 0) {
-            this.updateGhostFromPointer(e);
-        }
-    }
-
-    private updateGhostFromPointer(e: PointerEvent): void {
         const rect = this.renderer.canvas.getBoundingClientRect();
         const clientX = e.clientX - rect.left;
         const clientY = e.clientY - rect.top;
-
         const tile = this.raycastGround(clientX, clientY);
-        if (tile) {
-            if (this.ghostTileX !== tile.tileX || this.ghostTileZ !== tile.tileZ) {
+
+        if (this.isPlacing) {
+            if (tile) {
                 this.ghostTileX = tile.tileX;
                 this.ghostTileZ = tile.tileZ;
+                this.updateGhostScreenPos();
                 this.notifyState();
             }
+        } else {
+            // Check if user tapped an existing defender to select it and see range
+            if (tile) {
+                const clickedDefender = this.defenders.find(
+                    (d) => Math.hypot(d.x - (tile.tileX + 0.5), d.z - (tile.tileZ + 0.5)) < 1.3,
+                );
+                this.selectedDefenderId = clickedDefender ? clickedDefender.id : undefined;
+                this.notifyState();
+            }
+        }
+    }
+
+    private handlePointerMove(e: PointerEvent): void {
+        if (!this.isPlacing) return;
+        if (e.buttons > 0 || e.pointerType === "touch") {
+            const rect = this.renderer.canvas.getBoundingClientRect();
+            const clientX = e.clientX - rect.left;
+            const clientY = e.clientY - rect.top;
+            const tile = this.raycastGround(clientX, clientY);
+            if (tile) {
+                if (this.ghostTileX !== tile.tileX || this.ghostTileZ !== tile.tileZ) {
+                    this.ghostTileX = tile.tileX;
+                    this.ghostTileZ = tile.tileZ;
+                    this.updateGhostScreenPos();
+                    this.notifyState();
+                }
+            }
+        }
+    }
+
+    updateGhostScreenPos(camera?: Camera): void {
+        const cam = camera ?? this.mapViewer.camera;
+        if (!cam) return;
+
+        const wx = this.ghostTileX + 0.5;
+        const wz = this.ghostTileZ + 0.5;
+        const wy = this.ground(wx, wz);
+
+        vec4.set(this.tempVec, wx, wy, wz, 1);
+        vec4.transformMat4(this.tempVec, this.tempVec, cam.viewProjMatrix);
+        const w = this.tempVec[3];
+
+        if (w <= 0) {
+            this.ghostScreenPos.visible = false;
+            return;
+        }
+
+        const rect = this.renderer.canvas.getBoundingClientRect();
+        const ndcX = this.tempVec[0] / w;
+        const ndcY = this.tempVec[1] / w;
+
+        this.ghostScreenPos.x = rect.left + ((ndcX + 1) / 2) * rect.width;
+        this.ghostScreenPos.y = rect.top + ((1 - ndcY) / 2) * rect.height;
+        this.ghostScreenPos.visible = true;
+
+        // Directly sync DOM floating buttons element if mounted for zero-lag tracking
+        const el = document.getElementById("td-ghost-actions");
+        if (el) {
+            el.style.left = `${Math.round(this.ghostScreenPos.x)}px`;
+            el.style.top = `${Math.round(this.ghostScreenPos.y + 20)}px`;
+            el.style.display = this.ghostScreenPos.visible ? "flex" : "none";
         }
     }
 
@@ -398,8 +490,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
         const dirY = farY - nearY;
         const dirZ = farZ - nearZ;
 
-        // Ground elevation in Lumbridge
-        const groundY = this.ground(3236.5, 3223.5);
+        const groundY = this.ground(3237.0, 3224.0);
         if (Math.abs(dirY) < 1e-6) return undefined;
 
         const t = (groundY - nearY) / dirY;
@@ -418,9 +509,9 @@ export class LumbridgeTdGame implements GameFrameHandler {
         const dt = Math.min(deltaTimeMs / 1000, 0.1);
         this.clientTicks += Math.round(dt * 50);
 
-        // Fixed camera over Lumbridge path
-        const targetX = 3236.5;
-        const targetZ = 3223.5;
+        // Zoomed-out high-angle view over Lumbridge
+        const targetX = 3238.0;
+        const targetZ = 3226.0;
         const targetY = this.ground(targetX, targetZ);
         this.cameraRig.apply(camera, targetX, targetY, targetZ);
 
@@ -430,7 +521,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
             if (this.spawnTimer <= 0) {
                 this.spawnGoblin();
                 this.goblinsToSpawn--;
-                this.spawnTimer = 1.5;
+                this.spawnTimer = 1.4;
                 this.notifyState();
             }
         }
@@ -486,17 +577,17 @@ export class LumbridgeTdGame implements GameFrameHandler {
             this.notifyState();
         }
 
-        // Update Archers
-        for (const archer of this.archers) {
-            if (archer.attackCooldown > 0) archer.attackCooldown -= dt;
-            if (archer.shootAnimTimer > 0) archer.shootAnimTimer -= dt;
+        // Update Defenders (Archers and Wizards)
+        for (const defender of this.defenders) {
+            if (defender.attackCooldown > 0) defender.attackCooldown -= dt;
+            if (defender.shootAnimTimer > 0) defender.shootAnimTimer -= dt;
 
             let target: TdGoblin | undefined;
-            let minDist = archer.range;
+            let minDist = defender.range;
 
             for (const goblin of this.goblins) {
                 if (goblin.state !== "walking") continue;
-                const dist = Math.hypot(goblin.x - archer.x, goblin.y - archer.z);
+                const dist = Math.hypot(goblin.x - defender.x, goblin.y - defender.z);
                 if (dist < minDist) {
                     minDist = dist;
                     target = goblin;
@@ -504,58 +595,59 @@ export class LumbridgeTdGame implements GameFrameHandler {
             }
 
             if (target) {
-                const dx = target.x - archer.x;
-                const dz = target.y - archer.z;
-                archer.yaw = Math.round((Math.atan2(-dx, -dz) / (2 * Math.PI)) * 2048) & 2047;
-                archer.targetGoblinId = target.id;
+                const dx = target.x - defender.x;
+                const dz = target.y - defender.z;
+                defender.yaw = Math.round((Math.atan2(-dx, -dz) / (2 * Math.PI)) * 2048) & 2047;
+                defender.targetGoblinId = target.id;
 
-                if (archer.attackCooldown <= 0) {
-                    archer.attackCooldown = 1.1;
-                    archer.shootAnimTimer = 0.5;
+                if (defender.attackCooldown <= 0) {
+                    const isArcher = defender.type === "archer";
+                    defender.attackCooldown = isArcher ? 1.1 : 1.3;
+                    defender.shootAnimTimer = 0.5;
 
-                    const arrowY = this.ground(archer.x, archer.z) - 1.2;
+                    const spawnY = this.ground(defender.x, defender.z) - 1.2;
 
-                    this.arrows.push({
-                        id: this.nextArrowId++,
-                        startX: archer.x,
-                        startY: arrowY,
-                        startZ: archer.z,
-                        x: archer.x,
-                        y: arrowY,
-                        z: archer.z,
+                    this.projectiles.push({
+                        id: this.nextProjectileId++,
+                        kind: isArcher ? "arrow" : "fireball",
+                        startX: defender.x,
+                        startY: spawnY,
+                        startZ: defender.z,
+                        x: defender.x,
+                        y: spawnY,
+                        z: defender.z,
                         targetGoblinId: target.id,
-                        speed: 16.0,
+                        speed: isArcher ? 16.0 : 12.0,
                     });
 
-                    this.audio.play(2707, { volume: 0.7 });
+                    this.audio.play(isArcher ? 2707 : 160, { volume: 0.7 });
                 }
             }
         }
 
-        // Update Arrows
-        for (let i = this.arrows.length - 1; i >= 0; i--) {
-            const arrow = this.arrows[i];
-            const target = this.goblins.find((g) => g.id === arrow.targetGoblinId);
+        // Update Projectiles (Arrows and Fireballs)
+        for (let i = this.projectiles.length - 1; i >= 0; i--) {
+            const proj = this.projectiles[i];
+            const target = this.goblins.find((g) => g.id === proj.targetGoblinId);
 
             if (!target || target.state !== "walking") {
-                this.arrows.splice(i, 1);
+                this.projectiles.splice(i, 1);
                 continue;
             }
 
             const targetHeight = this.ground(target.x, target.y) - 0.7;
-
-            const dx = target.x - arrow.x;
-            const dy = targetHeight - arrow.y;
-            const dz = target.y - arrow.z;
+            const dx = target.x - proj.x;
+            const dy = targetHeight - proj.y;
+            const dz = target.y - proj.z;
             const dist = Math.hypot(dx, dy, dz);
-            const step = arrow.speed * dt;
+            const step = proj.speed * dt;
 
             if (dist <= step || dist < 0.4) {
                 target.hp = 0;
                 target.state = "dying";
                 target.deathProgress = 0;
 
-                this.audio.play(471, { volume: 0.8 });
+                this.audio.play(proj.kind === "arrow" ? 471 : 161, { volume: 0.8 });
 
                 this.hitsplats.push({
                     id: this.nextHitsplatId++,
@@ -565,25 +657,21 @@ export class LumbridgeTdGame implements GameFrameHandler {
                     createdTime: performance.now(),
                 });
 
-                this.arrows.splice(i, 1);
+                this.projectiles.splice(i, 1);
                 this.notifyState();
             } else {
-                arrow.x += (dx / dist) * step;
-                arrow.y += (dy / dist) * step;
-                arrow.z += (dz / dist) * step;
+                proj.x += (dx / dist) * step;
+                proj.y += (dy / dist) * step;
+                proj.z += (dz / dist) * step;
             }
         }
 
         const now = performance.now();
         this.hitsplats = this.hitsplats.filter((h) => now - h.createdTime < 1200);
 
-        // Update ghost screen position for floating buttons
-        if (this.isPlacingArcher) {
-            const gh = this.ground(this.ghostTileX + 0.5, this.ghostTileZ + 0.5);
-            this.overlay.project(this.ghostTileX + 0.5, gh, this.ghostTileZ + 0.5, this.screen);
-            this.ghostScreenPos.x = this.screen.x;
-            this.ghostScreenPos.y = this.screen.y;
-            this.ghostScreenPos.visible = this.screen.visible;
+        // Update ghost screen position
+        if (this.isPlacing) {
+            this.updateGhostScreenPos(camera);
         }
     }
 
@@ -615,35 +703,45 @@ export class LumbridgeTdGame implements GameFrameHandler {
             }
         }
 
-        // Draw Placed Archers
-        const playerBake = this.assets.getPlayerBake(0);
-        const archerModel = playerBake?.model;
+        // Draw Placed Defenders (Archers and Wizards)
+        const archerBake = this.assets.getPlayerBake(0);
+        const wizardBake = this.assets.getPlayerBake(1);
 
-        if (archerModel) {
-            const idleAnim = archerModel.getAnim(playerBake.stance.idle);
-            const shootAnim = archerModel.getAnim(426);
+        for (const defender of this.defenders) {
+            const isArcher = defender.type === "archer";
+            const bake = isArcher ? archerBake : wizardBake;
+            const model = bake?.model;
 
-            for (const archer of this.archers) {
-                const height = this.ground(archer.x, archer.z);
-                const isShooting = archer.shootAnimTimer > 0;
-                const anim = isShooting && shootAnim ? shootAnim : idleAnim;
+            if (model) {
+                const idleAnim = model.getAnim(bake.stance.idle);
+                const attackAnim = model.getAnim(isArcher ? 426 : 711);
+                const isShooting = defender.shootAnimTimer > 0;
+                const anim = isShooting && attackAnim ? attackAnim : idleAnim;
                 const frame = anim.getFrame(this.clientTicks);
+                const height = this.ground(defender.x, defender.z);
 
-                actors.draw(archerModel, anim, frame, archer.x, height, archer.z, archer.yaw, {
+                actors.draw(model, anim, frame, defender.x, height, defender.z, defender.yaw, {
                     scale: 1.0,
                 });
             }
+        }
 
-            // Draw Ghost Archer if placing
-            if (this.isPlacingArcher) {
+        // Draw Ghost Defender if placing
+        if (this.isPlacing) {
+            const isArcher = this.placingType === "archer";
+            const bake = isArcher ? archerBake : wizardBake;
+            const model = bake?.model;
+
+            if (model) {
+                const idleAnim = model.getAnim(bake.stance.idle);
                 const ghostX = this.ghostTileX + 0.5;
                 const ghostZ = this.ghostTileZ + 0.5;
                 const ghostH = this.ground(ghostX, ghostZ);
-                const isValid = this.canPlaceArcherAt(this.ghostTileX, this.ghostTileZ);
+                const isValid = this.canPlaceDefenderAt(this.ghostTileX, this.ghostTileZ);
                 const tint = isValid ? 0x44ff66 : 0xff3333;
                 const frame = idleAnim.getFrame(this.clientTicks);
 
-                actors.draw(archerModel, idleAnim, frame, ghostX, ghostH, ghostZ, 1024, {
+                actors.draw(model, idleAnim, frame, ghostX, ghostH, ghostZ, 1024, {
                     scale: 1.0,
                     tint,
                     alpha: 0.8,
@@ -652,22 +750,25 @@ export class LumbridgeTdGame implements GameFrameHandler {
             }
         }
 
-        // Draw Arrows
+        // Draw Projectiles
         const arrowModel = this.assets.get("spot:10");
-        if (arrowModel) {
-            const arrowAnim = arrowModel.anims[0];
-            for (const arrow of this.arrows) {
-                const target = this.goblins.find((g) => g.id === arrow.targetGoblinId);
+        const fireModel = this.assets.get("spot:100");
+
+        for (const proj of this.projectiles) {
+            const model = proj.kind === "arrow" ? arrowModel : fireModel;
+            if (model) {
+                const anim = model.anims[0];
+                const target = this.goblins.find((g) => g.id === proj.targetGoblinId);
                 const yaw = target
                     ? Math.round(
-                          (Math.atan2(-(target.x - arrow.x), -(target.y - arrow.z)) /
+                          (Math.atan2(-(target.x - proj.x), -(target.y - proj.z)) /
                               (2 * Math.PI)) *
                               2048,
                       ) & 2047
                     : 0;
 
-                actors.draw(arrowModel, arrowAnim, 0, arrow.x, arrow.y, arrow.z, yaw, {
-                    scale: 1.4,
+                actors.draw(model, anim, 0, proj.x, proj.y, proj.z, yaw, {
+                    scale: proj.kind === "arrow" ? 1.4 : 1.8,
                 });
             }
         }
@@ -678,38 +779,28 @@ export class LumbridgeTdGame implements GameFrameHandler {
         const ctx = this.overlay.ctx;
         const now = performance.now();
 
-        // 1. Draw Range Circle around Ghost Archer
-        if (this.isPlacingArcher) {
-            const centerX = this.ghostTileX + 0.5;
-            const centerZ = this.ghostTileZ + 0.5;
-            const h = this.ground(centerX, centerZ);
-            const p = this.overlay.project(centerX, h, centerZ, { x: 0, y: 0, visible: false });
-
-            if (p.visible) {
-                const edgeP = this.overlay.project(centerX + 7.0, h, centerZ, {
-                    x: 0,
-                    y: 0,
-                    visible: false,
-                });
-                const radius = Math.abs(edgeP.x - p.x);
-                const isValid = this.canPlaceArcherAt(this.ghostTileX, this.ghostTileZ);
-
-                ctx.beginPath();
-                ctx.ellipse(p.x, p.y, radius, radius * 0.7, 0, 0, Math.PI * 2);
-                ctx.lineWidth = 2;
-                ctx.strokeStyle = isValid ? "rgba(68, 255, 102, 0.75)" : "rgba(255, 68, 68, 0.75)";
-                ctx.setLineDash([8, 6]);
-                ctx.stroke();
-                ctx.setLineDash([]);
+        // 1. Draw Range Circle for Selected Placed Defender
+        if (this.selectedDefenderId !== undefined) {
+            const selected = this.defenders.find((d) => d.id === this.selectedDefenderId);
+            if (selected) {
+                this.drawPreciseRangeCircle(selected.x, selected.z, selected.range, "rgba(255, 204, 0, 0.85)");
             }
         }
 
-        // 2. Draw Hitsplats
+        // 2. Draw Range Circle around Ghost Defender during placement
+        if (this.isPlacing) {
+            const range = this.placingType === "archer" ? 7.0 : 6.5;
+            const isValid = this.canPlaceDefenderAt(this.ghostTileX, this.ghostTileZ);
+            const color = isValid ? "rgba(68, 255, 102, 0.85)" : "rgba(255, 68, 68, 0.85)";
+            this.drawPreciseRangeCircle(this.ghostTileX + 0.5, this.ghostTileZ + 0.5, range, color);
+        }
+
+        // 3. Draw Hitsplats
         const damageSprite = this.assets.getSprite(HITSPLAT_SPRITES.damage);
         for (const hitsplat of this.hitsplats) {
             const progress = (now - hitsplat.createdTime) / 1200;
             const h = this.ground(hitsplat.x, hitsplat.z) - 1.2 - progress * 0.4;
-            const p = this.overlay.project(hitsplat.x, h, hitsplat.z, this.screen);
+            const p = this.overlay.project(hitsplat.x, h, hitsplat.z, this.screenHelper);
 
             if (p.visible) {
                 const spriteW = (damageSprite?.width ?? 28) * 1.2;
@@ -734,11 +825,11 @@ export class LumbridgeTdGame implements GameFrameHandler {
             }
         }
 
-        // 3. Draw Goblin Health Bars
+        // 4. Draw Goblin Health Bars
         for (const goblin of this.goblins) {
             if (goblin.state !== "walking") continue;
             const h = this.ground(goblin.x, goblin.y) - 1.2;
-            const p = this.overlay.project(goblin.x, h, goblin.y, this.screen);
+            const p = this.overlay.project(goblin.x, h, goblin.y, this.screenHelper);
 
             if (p.visible) {
                 const barWidth = 32;
@@ -757,6 +848,37 @@ export class LumbridgeTdGame implements GameFrameHandler {
                 ctx.fillRect(left, top, barWidth * fraction, barHeight);
             }
         }
+    }
+
+    // Mathematically precise range circle in 3D world space projected to screen
+    private drawPreciseRangeCircle(centerX: number, centerZ: number, range: number, color: string): void {
+        const ctx = this.overlay.ctx;
+        ctx.beginPath();
+        const segments = 36;
+        let first = true;
+
+        for (let i = 0; i <= segments; i++) {
+            const angle = (i / segments) * Math.PI * 2;
+            const wx = centerX + range * Math.cos(angle);
+            const wz = centerZ + range * Math.sin(angle);
+            const wy = this.ground(wx, wz);
+            const p = this.overlay.project(wx, wy, wz, this.screenHelper);
+
+            if (p.visible) {
+                if (first) {
+                    ctx.moveTo(p.x, p.y);
+                    first = false;
+                } else {
+                    ctx.lineTo(p.x, p.y);
+                }
+            }
+        }
+
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = color;
+        ctx.setLineDash([8, 6]);
+        ctx.stroke();
+        ctx.setLineDash([]);
     }
 
     dispose(): void {

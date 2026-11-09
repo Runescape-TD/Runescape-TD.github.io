@@ -155,8 +155,9 @@ export function GameApp(): JSX.Element {
                     gateHp: game.gateHp,
                     maxGateHp: game.maxGateHp,
                     gold: game.gold,
-                    archersCount: 0,
-                    isPlacingArcher: false,
+                    defendersCount: 0,
+                    isPlacing: false,
+                    placingType: "archer",
                     ghostTileX: game.ghostTileX,
                     ghostTileZ: game.ghostTileZ,
                     isGhostValid: true,
@@ -199,9 +200,9 @@ export function GameApp(): JSX.Element {
                 <TdOverlayUi
                     state={tdState}
                     onStartWave={() => tdGame.startWave()}
-                    onSelectArcher={() => tdGame.startPlacingArcher()}
-                    onConfirmPlacement={() => tdGame.confirmPlacingArcher()}
-                    onCancelPlacement={() => tdGame.cancelPlacingArcher()}
+                    onSelectDefender={(type) => tdGame.startPlacing(type)}
+                    onConfirmPlacement={() => tdGame.confirmPlacing()}
+                    onCancelPlacement={() => tdGame.cancelPlacing()}
                 />
             )}
         </div>
