@@ -161,15 +161,15 @@ export class LumbridgeTdGame implements GameFrameHandler {
         });
         await assets.setPlayerAppearance(wizardAppearance, 1, [711]);
 
-        // Slot 2: Duke Horacio (Crown, royal elegant top, royal cape, amulet)
+        // Slot 2: Duke Horacio (Crown, royal gilded armor, cape, amulet of glory - all verified in slim cache)
         const dukeAppearance = createAppearance({
-            [EquipSlot.HEAD]: 10776, // Gold crown
-            [EquipSlot.TORSO]: 6139, // Elegant royal top
-            [EquipSlot.LEGS]: 6141, // Elegant bottoms
-            [EquipSlot.CAPE]: 1007, // Red royal cape
+            [EquipSlot.HEAD]: 1040, // Yellow partyhat (Crown look)
+            [EquipSlot.TORSO]: 3481, // Gilded platebody
+            [EquipSlot.LEGS]: 3483, // Gilded platelegs
+            [EquipSlot.CAPE]: 1021, // Cape
             [EquipSlot.AMULET]: 1704, // Amulet of glory
         });
-        await assets.setPlayerAppearance(dukeAppearance, 2, [424]);
+        await assets.setPlayerAppearance(dukeAppearance, 2, []);
 
         const grid = new ArenaGrid(await regionPromise);
         await soundsPromise;
@@ -853,13 +853,14 @@ export class LumbridgeTdGame implements GameFrameHandler {
         const dukeModel = dukeBake?.model;
         if (dukeModel) {
             const idleAnim = dukeModel.getAnim(dukeBake.stance.idle);
-            const flinchAnim = dukeModel.getAnim(424);
             const isFlinching = this.dukeFlinchTimer > 0;
-            const anim = isFlinching && flinchAnim ? flinchAnim : idleAnim;
+            const anim = idleAnim;
             const frame = anim.getFrame(this.clientTicks);
-            const dukeX = 3225.5;
+            // Visual flinch: quick physical recoil shake and tint when hit
+            const recoil = isFlinching ? Math.sin(this.dukeFlinchTimer * 30) * 0.12 : 0;
+            const dukeX = 3225.5 + recoil;
             const dukeZ = 3221.0;
-            const dukeH = this.ground(dukeX, dukeZ);
+            const dukeH = this.ground(3225.5, 3221.0);
 
             actors.draw(dukeModel, anim, frame, dukeX, dukeH, dukeZ, 512, {
                 scale: 1.6,
