@@ -21,14 +21,14 @@ export interface Waypoint {
 
 // Symmetric 2-tile wide path with sharp 90-degree turns:
 // 1. Straight west across stone bridge (Z=3226.0)
-// 2. Sharp turn 90° south at dirt road (X=3236.5)
+// 2. Sharp turn 90° south at dirt road (X=3236.0, shifted 1 tile left)
 // 3. Sharp turn 90° west into castle gate to Duke Horacio (Z=3221.0)
 export const LUMBRIDGE_PATH: Waypoint[] = [
     { x: 3253.0, y: 3226.0 }, // East river bank
     { x: 3245.0, y: 3226.0 }, // Straight across stone bridge
-    { x: 3236.5, y: 3226.0 }, // Turn 1: 90 degrees south
-    { x: 3236.5, y: 3221.0 }, // Turn 2: 90 degrees west
-    { x: 3227.0, y: 3221.0 }, // Directly in front of Duke Horacio
+    { x: 3236.0, y: 3226.0 }, // Turn 1: 90 degrees south onto vertical road
+    { x: 3236.0, y: 3221.0 }, // Turn 2: 90 degrees west onto castle road
+    { x: 3227.5, y: 3221.0 }, // Right in front of Duke Horacio
 ];
 
 export type DefenderType = "archer" | "wizard";
@@ -161,14 +161,14 @@ export class LumbridgeTdGame implements GameFrameHandler {
         });
         await assets.setPlayerAppearance(wizardAppearance, 1, [711]);
 
-        // Slot 2: Duke Horacio (Crown, royal gilded armor, cape, amulet of glory - all verified in slim cache)
+        // Slot 2: Duke Horacio (Classic Lumbridge noble look: natural brown hair & beard, elegant noble top & legs, amulet, cape)
         const dukeAppearance = createAppearance({
-            [EquipSlot.HEAD]: 1040, // Yellow partyhat (Crown look)
-            [EquipSlot.TORSO]: 3481, // Gilded platebody
-            [EquipSlot.LEGS]: 3483, // Gilded platelegs
-            [EquipSlot.CAPE]: 1021, // Cape
+            [EquipSlot.TORSO]: 6139, // Noble royal top
+            [EquipSlot.LEGS]: 6141, // Noble royal bottoms
+            [EquipSlot.CAPE]: 1021, // Red/Blue Cape
             [EquipSlot.AMULET]: 1704, // Amulet of glory
         });
+        dukeAppearance.colors = [2, 11, 4, 3, 0]; // Brown hair/beard, noble tunic, brown legs, skin
         await assets.setPlayerAppearance(dukeAppearance, 2, []);
 
         const grid = new ArenaGrid(await regionPromise);
@@ -259,6 +259,14 @@ export class LumbridgeTdGame implements GameFrameHandler {
     }
 
     ground(x: number, z: number): number {
+        // Across the Lumbridge stone bridge (River Lum), the bridge deck is an elevated horizontal span
+        // connecting the East and West river banks at road height
+        if (x >= 3237.0 && x <= 3250.0 && z >= 3224.0 && z <= 3227.0) {
+            const westY = this.grid.getHeight(3236, 3226) / 128;
+            const eastY = this.grid.getHeight(3251, 3226) / 128;
+            const t = (x - 3237.0) / (3250.0 - 3237.0);
+            return westY + (eastY - westY) * t;
+        }
         return this.grid.getHeight(x, z) / 128;
     }
 
@@ -368,20 +376,20 @@ export class LumbridgeTdGame implements GameFrameHandler {
     }
 
     // Exact 2-tile wide path corridors:
-    // 1. Across bridge from East bank: X in [3236 .. 3253], Z in [3225, 3226]
-    // 2. Down dirt road: X in [3236, 3237], Z in [3220 .. 3226]
-    // 3. Into castle gate: X in [3224 .. 3237], Z in [3220, 3221]
+    // 1. Across bridge from East bank: X in [3235 .. 3253], Z in [3225, 3226]
+    // 2. Down dirt road (shifted 1 tile left): X in [3235, 3236], Z in [3220 .. 3226]
+    // 3. Into castle gate: X in [3226 .. 3236], Z in [3220, 3221]
     isTileOnPath(tileX: number, tileZ: number): boolean {
         // Corridor 1: East bank across bridge (width 2: Z=3225 and Z=3226)
-        if (tileX >= 3236 && tileX <= 3253 && (tileZ === 3225 || tileZ === 3226)) {
+        if (tileX >= 3235 && tileX <= 3253 && (tileZ === 3225 || tileZ === 3226)) {
             return true;
         }
-        // Corridor 2: Turn south down road (width 2: X=3236 and X=3237)
-        if ((tileX === 3236 || tileX === 3237) && tileZ >= 3220 && tileZ <= 3226) {
+        // Corridor 2: Turn south down road (width 2: X=3235 and X=3236, shifted 1 tile left)
+        if ((tileX === 3235 || tileX === 3236) && tileZ >= 3220 && tileZ <= 3226) {
             return true;
         }
         // Corridor 3: Turn west into castle gate (width 2: Z=3220 and Z=3221)
-        if (tileX >= 3224 && tileX <= 3237 && (tileZ === 3220 || tileZ === 3221)) {
+        if (tileX >= 3226 && tileX <= 3236 && (tileZ === 3220 || tileZ === 3221)) {
             return true;
         }
         return false;
@@ -391,16 +399,8 @@ export class LumbridgeTdGame implements GameFrameHandler {
         if (this.isTileOnPath(tileX, tileZ)) {
             return false;
         }
-        // Entire river and bridge zone outside the 2-tile path is blocked (no green on bridge!)
+        // River Lum water zone is blocked (bridge itself is on path)
         if (tileX >= 3240 && tileX <= 3249) {
-            return false;
-        }
-        // Inside or walls of stone watchtower
-        if (tileX >= 3230 && tileX <= 3235 && tileZ >= 3222 && tileZ <= 3226) {
-            return false;
-        }
-        // Castle walls and courtyard interior near Duke
-        if (tileX < 3227 && tileZ >= 3218 && tileZ <= 3224) {
             return false;
         }
         if (this.defenders.some((d) => d.tileX === tileX && d.tileZ === tileZ)) {
@@ -638,7 +638,8 @@ export class LumbridgeTdGame implements GameFrameHandler {
                     // Goblin arrived at Duke Horacio!
                     goblin.state = "attacking_duke";
                     goblin.attackTimer = 0.55;
-                    goblin.yaw = Math.round((Math.atan2(-(3225.5 - goblin.x), -(3221.0 - goblin.y)) / (2 * Math.PI)) * 2048) & 2047;
+                    // Facing West towards Duke Horacio
+                    goblin.yaw = 512;
                     continue;
                 }
 
@@ -666,7 +667,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
 
                     this.hitsplats.push({
                         id: this.nextHitsplatId++,
-                        x: 3225.5,
+                        x: 3226.5,
                         z: 3221.0,
                         amount: 10,
                         createdTime: performance.now(),
@@ -856,13 +857,14 @@ export class LumbridgeTdGame implements GameFrameHandler {
             const isFlinching = this.dukeFlinchTimer > 0;
             const anim = idleAnim;
             const frame = anim.getFrame(this.clientTicks);
-            // Visual flinch: quick physical recoil shake and tint when hit
+            // Visual flinch: quick physical recoil shake when hit
             const recoil = isFlinching ? Math.sin(this.dukeFlinchTimer * 30) * 0.12 : 0;
-            const dukeX = 3225.5 + recoil;
+            const dukeX = 3226.5 + recoil;
             const dukeZ = 3221.0;
-            const dukeH = this.ground(3225.5, 3221.0);
+            const dukeH = this.ground(3226.5, 3221.0);
 
-            actors.draw(dukeModel, anim, frame, dukeX, dukeH, dukeZ, 512, {
+            // Facing directly EAST (yaw = 1536) towards the incoming enemies along the horizontal path
+            actors.draw(dukeModel, anim, frame, dukeX, dukeH, dukeZ, 1536, {
                 scale: 1.6,
             });
         }
@@ -996,8 +998,8 @@ export class LumbridgeTdGame implements GameFrameHandler {
         }
 
         // Draw Duke Horacio Overhead Title
-        const dukeHeadH = this.ground(3225.5, 3221.0) - 1.5;
-        const dukeScreen = this.overlay.project(3225.5, dukeHeadH, 3221.0, this.screenHelper);
+        const dukeHeadH = this.ground(3226.5, 3221.0) - 1.5;
+        const dukeScreen = this.overlay.project(3226.5, dukeHeadH, 3221.0, this.screenHelper);
         if (dukeScreen.visible) {
             ctx.font = "bold 13px 'OSRS Bold', Arial, sans-serif";
             ctx.textAlign = "center";
@@ -1049,9 +1051,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
                 if (!p00 || !p10 || !p11 || !p01) continue;
 
                 const isOnPath = this.isTileOnPath(x, z);
-                const isWaterOrBridgeEdge = x >= 3240 && x <= 3249 && !isOnPath;
-                const isWatchtower = x >= 3230 && x <= 3235 && z >= 3222 && z <= 3226;
-                const isCastleWall = x < 3227 && (z < 3220 || z > 3221);
+                const isWater = x >= 3240 && x <= 3249 && !isOnPath;
                 const isValid = this.canPlaceDefenderAt(x, z);
 
                 if (isOnPath) {
@@ -1078,8 +1078,8 @@ export class LumbridgeTdGame implements GameFrameHandler {
                     ctx.strokeStyle = "rgba(239, 68, 68, 0.75)";
                     ctx.lineWidth = 1.4;
                     ctx.stroke();
-                } else if (isWaterOrBridgeEdge || isWatchtower || isCastleWall) {
-                    // Blocked non-buildable areas (water, railings, walls)
+                } else if (isWater) {
+                    // Blocked River Lum water
                     ctx.fillStyle = "rgba(220, 38, 38, 0.12)";
                     ctx.strokeStyle = "rgba(239, 68, 68, 0.3)";
                     ctx.lineWidth = 1;
@@ -1093,7 +1093,7 @@ export class LumbridgeTdGame implements GameFrameHandler {
                     ctx.fill();
                     ctx.stroke();
                 } else if (isValid) {
-                    // Translucent green for buildable terrain
+                    // Translucent green for buildable terrain across the grounds
                     ctx.fillStyle = "rgba(34, 197, 94, 0.16)";
                     ctx.strokeStyle = "rgba(34, 197, 94, 0.38)";
                     ctx.lineWidth = 1;
