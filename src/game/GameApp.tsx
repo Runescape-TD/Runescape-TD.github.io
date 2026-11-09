@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import WebFont from "webfontloader";
 
 import { RendererCanvas } from "../components/renderer/RendererCanvas";
+import { RotateNotice } from "../components/RotateNotice";
 import { OsrsLoadingBar } from "../components/rs/loading/OsrsLoadingBar";
 import { fetchCacheList, loadCacheFiles } from "../mapviewer/Caches";
 import { MapViewer } from "../mapviewer/MapViewer";
@@ -30,7 +31,8 @@ WebFont.load({
     },
 });
 
-const workerPool = RenderDataWorkerPool.create(isCoarsePointer ? 2 : 4);
+// Single worker on mobile to prevent memory pressure and timeout
+const workerPool = RenderDataWorkerPool.create(isCoarsePointer ? 1 : 4);
 
 if (import.meta.hot) {
     import.meta.hot.on("vite:beforeUpdate", () => window.location.reload());
@@ -154,6 +156,11 @@ export function GameApp(): JSX.Element {
                     maxGateHp: game.maxGateHp,
                     gold: game.gold,
                     archersCount: 0,
+                    isPlacingArcher: false,
+                    ghostTileX: game.ghostTileX,
+                    ghostTileZ: game.ghostTileZ,
+                    isGhostValid: true,
+                    ghostScreenPos: { x: 0, y: 0, visible: false },
                 });
                 setLoadingText("");
             })
@@ -170,6 +177,9 @@ export function GameApp(): JSX.Element {
 
     return (
         <div className="game-root">
+            {/* Show rotate notice on phone portrait */}
+            <RotateNotice />
+
             {loaded && <RendererCanvas renderer={loaded.renderer} />}
             <canvas className="game-overlay" ref={overlayRef} />
 
@@ -189,6 +199,9 @@ export function GameApp(): JSX.Element {
                 <TdOverlayUi
                     state={tdState}
                     onStartWave={() => tdGame.startWave()}
+                    onSelectArcher={() => tdGame.startPlacingArcher()}
+                    onConfirmPlacement={() => tdGame.confirmPlacingArcher()}
+                    onCancelPlacement={() => tdGame.cancelPlacingArcher()}
                 />
             )}
         </div>

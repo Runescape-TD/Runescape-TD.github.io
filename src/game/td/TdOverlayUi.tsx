@@ -5,66 +5,120 @@ import "./TdOverlayUi.css";
 export interface TdOverlayUiProps {
     state: TdGameState;
     onStartWave: () => void;
+    onSelectArcher: () => void;
+    onConfirmPlacement: () => void;
+    onCancelPlacement: () => void;
 }
 
-export function TdOverlayUi({ state, onStartWave }: TdOverlayUiProps): JSX.Element {
+export function TdOverlayUi({
+    state,
+    onStartWave,
+    onSelectArcher,
+    onConfirmPlacement,
+    onCancelPlacement,
+}: TdOverlayUiProps): JSX.Element {
     const isWaveRunning = state.waveActive;
     const gatePercent = Math.max(0, Math.min(100, (state.gateHp / state.maxGateHp) * 100));
 
+    // Floating confirm/cancel buttons under the ghost archer
+    const showGhostButtons = state.isPlacingArcher && state.ghostScreenPos.visible;
+    const ghostLeft = state.ghostScreenPos.x;
+    const ghostTop = state.ghostScreenPos.y + 45; // Just below the ghost's feet
+
     return (
-        <div className="td-ui-container" dir="rtl">
-            {/* Top Bar: Gate HP & Unlimited Coins */}
+        <div className="td-ui-container" dir="ltr">
+            {/* Top Bar: Minimalist Badges in corners */}
             <header className="td-top-bar">
-                <div className="td-status-box">
-                    <span className="td-title">🏰 שער לאמברידג׳</span>
-                    <div className="td-hp-bar-bg">
+                {/* Gate HP Badge */}
+                <div className="td-badge td-gate-badge">
+                    <span className="td-badge-icon">🏰</span>
+                    <div className="td-hp-bar">
                         <div
-                            className="td-hp-bar-fill"
+                            className="td-hp-fill"
                             style={{
                                 width: `${gatePercent}%`,
-                                backgroundColor: gatePercent > 30 ? "#34d399" : "#ef4444",
+                                backgroundColor: gatePercent > 30 ? "#22c55e" : "#ef4444",
                             }}
                         />
                     </div>
-                    <span className="td-hp-text">{state.gateHp} / {state.maxGateHp} HP</span>
+                    <span className="td-badge-text">{state.gateHp} HP</span>
                 </div>
 
-                <div className="td-coins-badge">
-                    <span className="td-coin-icon">🪙</span>
-                    <span className="td-coin-amount">GP: ∞ (ללא הגבלה)</span>
+                {/* Coins Badge */}
+                <div className="td-badge td-gold-badge">
+                    <span className="td-badge-icon">🪙</span>
+                    <span className="td-badge-text">GP: ∞</span>
                 </div>
 
-                <div className="td-wave-badge">
-                    <span>גל {state.waveNumber}</span>
+                {/* Wave Badge */}
+                <div className="td-badge td-wave-badge">
+                    <span className="td-badge-text">
+                        {isWaveRunning ? `Wave ${state.waveNumber} (${state.goblinsAlive})` : `Wave ${state.waveNumber}`}
+                    </span>
                 </div>
             </header>
 
-            {/* Bottom Panel: Defender Selection & Wave Start */}
-            <footer className="td-bottom-panel">
-                <div className="td-controls-row">
-                    <div className="td-defender-card active">
-                        <div className="td-defender-icon">🏹</div>
-                        <div className="td-defender-details">
-                            <span className="td-defender-name">קשת (Lumbridge Archer)</span>
-                            <span className="td-defender-desc">מחסל גובלין במכה אחת (1-Hit Kill) | חינם</span>
-                        </div>
+            {/* Bottom Bar: Compact corner buttons */}
+            <footer className="td-bottom-bar">
+                {/* Archer Recruit Pill (Bottom Left) */}
+                <button
+                    className={`td-btn-recruit ${state.isPlacingArcher ? "active" : ""}`}
+                    onClick={onSelectArcher}
+                    title="Click to place Archer on grass"
+                >
+                    <span className="td-recruit-icon">🏹</span>
+                    <div className="td-recruit-info">
+                        <span className="td-recruit-title">Archer</span>
+                        <span className="td-recruit-sub">1-Hit Kill | Free</span>
                     </div>
+                </button>
 
+                {/* Start Wave Pill (Bottom Right) */}
+                <button
+                    className={`td-btn-wave ${isWaveRunning ? "disabled" : ""}`}
+                    onClick={onStartWave}
+                    disabled={isWaveRunning}
+                >
+                    <span className="td-wave-icon">⚔️</span>
+                    <span>{isWaveRunning ? "Wave in Progress..." : "Start Wave"}</span>
+                </button>
+            </footer>
+
+            {/* Floating Action Buttons under Ghost Archer during placement */}
+            {showGhostButtons && (
+                <div
+                    className="td-ghost-actions"
+                    style={{
+                        left: `${ghostLeft}px`,
+                        top: `${ghostTop}px`,
+                    }}
+                >
+                    {/* Confirm Button */}
                     <button
-                        className={`td-wave-btn ${isWaveRunning ? "running" : ""}`}
-                        onClick={onStartWave}
-                        disabled={isWaveRunning}
+                        className={`td-ghost-btn confirm ${state.isGhostValid ? "" : "disabled"}`}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            if (state.isGhostValid) onConfirmPlacement();
+                        }}
+                        disabled={!state.isGhostValid}
+                        title={state.isGhostValid ? "Confirm placement" : "Cannot place here"}
                     >
-                        {isWaveRunning
-                            ? `גל בפעולה (${state.goblinsAlive} נותרו)`
-                            : "⚔️ התחל משחק / גל"}
+                        ✓
+                    </button>
+
+                    {/* Cancel Button */}
+                    <button
+                        className="td-ghost-btn cancel"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onCancelPlacement();
+                        }}
+                        title="Cancel placement"
+                    >
+                        ✕
                     </button>
                 </div>
-
-                <div className="td-hint">
-                    💡 <strong>הוראות:</strong> לחץ על שטחי הדשא שמסביב לשביל כדי להציב קשתים. השביל עצמו שמור לתנועת האויבים בלבד.
-                </div>
-            </footer>
+            )}
         </div>
     );
 }

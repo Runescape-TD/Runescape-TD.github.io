@@ -20,7 +20,7 @@ function spawnWorker(): Promise<RenderDataWorkerThread> {
     const worker = new Worker(new URL("./RenderDataWorker.ts", import.meta.url), {
         type: "module",
     });
-    return spawn<RenderDataWorker>(worker);
+    return spawn<RenderDataWorker>(worker, { timeout: 60000 });
 }
 
 export class RenderDataWorkerPool {

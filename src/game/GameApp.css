@@ -1,1 +1,27 @@
-/* bundled in index.css */
+.game-loading-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000000;
+    z-index: 9999;
+    direction: ltr;
+}
+
+.game-status {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000000;
+    color: #ff981f;
+    font-family: "OSRS Bold", Arial, sans-serif;
+    font-size: 16px;
+    text-shadow: 1px 1px #000000;
+    z-index: 9999;
+}
