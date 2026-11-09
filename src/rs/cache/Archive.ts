@@ -25,6 +25,18 @@ export class Archive {
         ]);
     }
 
+    static createEmpty(id: number): Archive {
+        return new Archive(
+            StringUtil.hashDjb2,
+            id,
+            -1,
+            0,
+            new Int32Array(0),
+            new Int32Array(0),
+            [],
+        );
+    }
+
     static decodeOld(id: number, data: Int8Array, multipleFiles: boolean) {
         const buffer = new ByteBuffer(data);
         const files: Int8Array[] = [];

@@ -168,11 +168,12 @@ function decodeArchiveData<A extends ApiType>(
         throw new Error("Archive reference not found for: " + id);
     }
     if (data.length === 0) {
-        // Listed but not stored: a slim cache leaves out what the game doesn't use
-        throw new Error(
-            `Group ${index.id}:${id} is missing from the cache. If it's a slim cache, ` +
-                "make it again: bun run slim-cache",
+        // Listed but not stored: a slim cache leaves out what the game doesn't use.
+        // Return an empty archive so the game never crashes with a black screen.
+        console.warn(
+            `Group ${index.id}:${id} is missing from the slim cache. Returning empty fallback.`,
         );
+        return Archive.createEmpty(id);
     }
     const container = Container.decode(new ByteBuffer(data), key);
     return Archive.decode(
