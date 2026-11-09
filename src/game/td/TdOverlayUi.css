@@ -1,0 +1,186 @@
+.td-ui-container {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 16px;
+    box-sizing: border-box;
+    font-family: "OSRS Bold", Arial, sans-serif;
+    user-select: none;
+    z-index: 10;
+}
+
+/* Top Bar */
+.td-top-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: rgba(22, 18, 14, 0.88);
+    border: 2px solid #5a4733;
+    border-radius: 8px;
+    padding: 10px 16px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+    pointer-events: auto;
+}
+
+.td-status-box {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.td-title {
+    font-size: 15px;
+    color: #ffcc00;
+    font-weight: bold;
+}
+
+.td-hp-bar-bg {
+    width: 140px;
+    height: 14px;
+    background: #2b1d12;
+    border: 1px solid #000;
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.td-hp-bar-fill {
+    height: 100%;
+    transition: width 0.3s ease;
+}
+
+.td-hp-text {
+    font-size: 13px;
+    color: #ffffff;
+}
+
+.td-coins-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(0, 0, 0, 0.4);
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid #786142;
+}
+
+.td-coin-icon {
+    font-size: 18px;
+}
+
+.td-coin-amount {
+    color: #ffd700;
+    font-size: 15px;
+    font-weight: bold;
+}
+
+.td-wave-badge {
+    font-size: 14px;
+    color: #ff9900;
+    font-weight: bold;
+    background: rgba(0, 0, 0, 0.4);
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid #786142;
+}
+
+/* Bottom Panel */
+.td-bottom-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: rgba(22, 18, 14, 0.92);
+    border: 2px solid #5a4733;
+    border-radius: 8px;
+    padding: 12px 18px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+    pointer-events: auto;
+    max-width: 600px;
+    margin: 0 auto;
+}
+
+.td-controls-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.td-defender-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(43, 33, 23, 0.9);
+    border: 2px solid #8e6c42;
+    border-radius: 6px;
+    padding: 8px 14px;
+    cursor: pointer;
+    transition: transform 0.15s, border-color 0.15s;
+}
+
+.td-defender-card.active {
+    border-color: #ffcc00;
+    box-shadow: 0 0 10px rgba(255, 204, 0, 0.4);
+}
+
+.td-defender-icon {
+    font-size: 24px;
+}
+
+.td-defender-details {
+    display: flex;
+    flex-direction: column;
+    text-align: right;
+}
+
+.td-defender-name {
+    font-size: 14px;
+    font-weight: bold;
+    color: #ffffff;
+}
+
+.td-defender-desc {
+    font-size: 12px;
+    color: #a3e635;
+}
+
+.td-wave-btn {
+    background: linear-gradient(180deg, #d97706 0%, #b45309 100%);
+    border: 2px solid #fef3c7;
+    color: #ffffff;
+    font-size: 16px;
+    font-weight: bold;
+    padding: 12px 24px;
+    border-radius: 6px;
+    cursor: pointer;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.4);
+    transition: background 0.2s, transform 0.1s;
+    white-space: nowrap;
+}
+
+.td-wave-btn:hover:not(:disabled) {
+    background: linear-gradient(180deg, #f59e0b 0%, #d97706 100%);
+    transform: translateY(-2px);
+}
+
+.td-wave-btn:active:not(:disabled) {
+    transform: translateY(1px);
+}
+
+.td-wave-btn.running {
+    background: #4b3d2f;
+    border-color: #6b5c4b;
+    color: #d1d5db;
+    cursor: not-allowed;
+}
+
+.td-hint {
+    font-size: 12px;
+    color: #cbd5e1;
+    text-align: center;
+    margin-top: 4px;
+    line-height: 1.4;
+}
